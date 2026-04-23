@@ -1,0 +1,10 @@
+# Copyright © 2025, SAS Institute Inc., Cary, NC, USA.  All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: velero-node-agent-priority
+value: 1000000
+globalDefault: false
+description: "High priority for Velero node-agent DaemonSet to ensure restore stability"

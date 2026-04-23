@@ -1,0 +1,52 @@
+# Velero Azure Automation - Environment Configuration
+# =================================================
+# Configure these values according to your Azure environment and requirements
+
+# Azure Configuration
+# -------------------
+# Azure Blob Storage account name for backup storage (must be globally unique in Azure, 3-24 lowercase alphanumeric)
+VELERO_STORE_NAME=psvelerostore
+VELERO_BLOB_RG=psvelerostorerg
+VELERO_SNAP_RG=psvelerosnapsrg
+VELERO_SERVICE_PRINCIPAL_NAME=velero-test
+# Location for storage account and Velero resource groups
+LOCATION=eastus
+
+# Kubernetes Configuration
+# ------------------------
+KUBECONFIG_PATH=/path/to/admin/kubeconfig
+# Storage class used for the NFS permission backup PVC
+NFS_STORAGE_CLASS=sas
+
+# Viya Deployment Configuration
+# -----------------------------
+# Valid values: "nmt" (Non-Multi-Tenant) or "mt" (Multi-Tenant)
+# Note: Only "nmt" supports Velero backup operations
+VIYA_DEPLOYMENT_TYPE=nmt
+
+# Cluster Type Configuration
+# -------------------------
+# Valid values: "source" or "restore"
+# Use "source" for backup operations, "restore" for restore operations
+CLUSTER_TYPE=source
+
+# AKS MC Resource Groups
+# ----------------------
+# Format: MC_{resource-group}_{cluster-name}_{region}
+# Update these based on your actual AKS cluster names
+# Name of MC resource group of the backup cluster
+SOURCE_MC_RESOURCE_GROUP=MC_viya4-backup-rg_viya4-backup-aks_eastus
+
+# Manual Azure Subscription Configuration
+# ---------------------------------------
+# Set this if Azure CLI is not available or for manual override
+# Leave empty to use Azure CLI automatic detection
+MANUAL_SUBSCRIPTION_ID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+
+# Notes:
+# ------
+# 1. Remove the '#' at the beginning of a line to enable that configuration
+# 2. Values should not have quotes around them
+# 3. Ensure MC resource group names match your actual AKS clusters
+# 4. For restore operations, set CLUSTER_TYPE=restore
+# 5. For backup operations, set CLUSTER_TYPE=source

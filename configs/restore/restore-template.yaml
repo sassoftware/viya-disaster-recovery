@@ -1,0 +1,14 @@
+# Copyright © 2025, SAS Institute Inc., Cary, NC, USA.  All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: RESTORE_NAME_PLACEHOLDER
+  namespace: velero
+spec:
+  backupName: BACKUP_NAME_PLACEHOLDER
+  restorePVs: true
+  includeClusterResources: true
+  # Restore to the same namespace by default
+  # namespaceMapping can be added if cross-namespace restore is needed

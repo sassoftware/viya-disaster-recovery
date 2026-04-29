@@ -318,7 +318,7 @@ Before running any restore command, the DR/target AKS cluster must already have 
 
 | Component | Namespace | Why it is required |
 |-----------|-----------|--------------------|
-| **Ingress controller** (nginx or Contour/Envoy) | `ingress-nginx` or `projectcontour` | Velero restores Viya `Ingress`/`HTTPProxy` objects — the controller must exist to serve them |
+| **Ingress controller** (nginx) | `ingress-nginx` | Velero restores Viya `Ingress`/`HTTPProxy` objects — the controller must exist to serve them |
 | **NFS CSI driver** | `kube-system` | Required to provision and mount NFS-backed `PersistentVolumes` restored by Velero |
 | **Azure Disk CSI driver** | `kube-system` | Required to provision and mount Azure Disk `PersistentVolumes` restored by Velero |
 | **NFS StorageClass** | cluster-scoped | Viya PVCs reference a named storage class — it must exist with the same name as on the source cluster |
@@ -330,7 +330,6 @@ Verify prerequisites are in place:
 
 ```bash
 kubectl get pods -n ingress-nginx                              # nginx ingress
-kubectl get pods -n projectcontour                             # Contour ingress
 kubectl get pods -n kube-system -l app=csi-nfs-node           # NFS CSI driver
 kubectl get pods -n kube-system -l app=azuredisk-csi-node     # Azure Disk CSI driver
 kubectl get storageclass                                       # Storage classes (names must match source cluster)
@@ -513,10 +512,6 @@ Use this when the source environment is **broken or being decommissioned** and y
 ```bash
 # nginx
 kubectl get svc -n ingress-nginx \
-  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'
-
-# Contour
-kubectl get svc -n projectcontour \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'
 ```
 

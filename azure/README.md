@@ -494,7 +494,7 @@ Resources are removed in this order to avoid dependency failures:
 ## SAS Viya Health Checker (Independent Tool)
 
 The health checker is a standalone tool that provides comprehensive health monitoring for SAS Viya deployments without requiring Velero or backup operations.
-Please refer to [`SAS Viya Health Checker`](https://github.com/sas-institute-rnd-internal/viya-disaster-recovery/blob/aws-support/README.md#-sas-viya-health-checker-standalone)
+Please refer to [`SAS Viya Health Checker`](https://github.com/sassoftware/blob/aws-support/README.md#-sas-viya-health-checker-standalone)
 
 ## Debugging & Troubleshooting
 

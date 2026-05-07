@@ -237,6 +237,37 @@ func executePermissionRestore(namespace string) error {
 	return nil
 }
 
+// executeIngressUpdate runs the update-ingress.sh script to patch ingress hostnames
+// after a Velero restore so they point to the DR cluster's nginx LoadBalancer address.
+func executeIngressUpdate(namespace string) error {
+	fmt.Printf("   Executing ingress update script for namespace: %s\n", namespace)
+
+	scriptPath := "./scripts/update-ingress.sh"
+
+	// Check if the script exists
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		return fmt.Errorf("ingress update script not found: %s", scriptPath)
+	}
+
+	cmd := exec.Command("bash", scriptPath)
+
+	// Pass NAMESPACE and optionally KUBECONFIG to the script
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("NAMESPACE=%s", namespace),
+	)
+	if configuredKubeconfigPath != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("KUBECONFIG=%s", configuredKubeconfigPath))
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ingress update script failed: %v\nOutput: %s", err, string(output))
+	}
+
+	fmt.Printf("   Ingress update script output:\n%s\n", string(output))
+	return nil
+}
+
 // InstallVelero installs Velero using the Azure credentials and configuration
 func InstallVelero(env Environment) error {
 	fmt.Println("\n   Installing Velero in Kubernetes Cluster")
@@ -795,14 +826,25 @@ func ExecuteBackup() error {
 	}
 	fmt.Printf("   Namespace %s exists in cluster\n", namespace)
 
-	// Step 5: Execute Permission Backup (NEW STEP)
+	// Step 5: Apply CSI NFS controller patch to extend snapshot timeout
+	// NFS snapshots are full copy operations that can take much longer than the
+	// default csi-snapshotter timeout. Patch it to 30m before taking any snapshots.
+	fmt.Printf("   Patching CSI NFS controller snapshotter timeout (30m)...\n")
+	if err := applyCSINFSControllerPatch(); err != nil {
+		// Non-fatal: warn but do not abort — cluster may not use NFS CSI
+		fmt.Printf("   Warning: CSI NFS controller patch failed (non-fatal): %v\n", err)
+	} else {
+		fmt.Printf("   CSI NFS controller patch applied\n")
+	}
+
+	// Step 6: Execute Permission Backup
 	fmt.Printf("   Running permission backup for NFS volumes...\n")
 	if err := executePermissionBackup(namespace); err != nil {
 		return fmt.Errorf("permission backup failed: %v", err)
 	}
 	fmt.Printf("   Permission backup completed successfully\n")
 
-	// Step 6: Create Backup Configuration
+	// Step 8: Create Backup Configuration
 	fmt.Printf("   Creating backup configuration...\n")
 	backupFile, backupName, err := createBackupConfig(namespace)
 	if err != nil {
@@ -811,13 +853,13 @@ func ExecuteBackup() error {
 	fmt.Printf("   Created backup config: %s\n", backupFile)
 	fmt.Printf("   Backup name: %s\n", backupName)
 
-	// Step 7: Execute Backup
+	// Step 9: Execute Backup
 	fmt.Printf("   Starting backup process...\n")
 	if err := applyBackupConfig(backupFile); err != nil {
 		return fmt.Errorf("backup execution failed: %v", err)
 	}
 
-	// Step 8: Monitor Backup Progress
+	// Step 10: Monitor Backup Progress
 	fmt.Printf("   Monitoring backup progress...\n")
 	if err := monitorBackupProgress(backupName); err != nil {
 		return fmt.Errorf("backup monitoring failed: %v", err)
@@ -1047,7 +1089,7 @@ func applyBackupConfig(backupFile string) error {
 func monitorBackupProgress(backupName string) error {
 	fmt.Printf("   Monitoring backup: %s\n", backupName)
 
-	maxWaitTime := 30 * time.Minute
+	maxWaitTime := 60 * time.Minute
 	checkInterval := 30 * time.Second
 	startTime := time.Now()
 
@@ -1190,36 +1232,6 @@ func promptAndSetRestoreKubeconfig() error {
 }
 
 // ExecuteRestore orchestrates the complete restore process with automatic Velero installation
-// executeIngressUpdate runs the ingress update script for the specified namespace.
-// The new DR cluster ingress hostname is auto-detected inside the script from
-// the nginx ingress LoadBalancer service — no manual configuration required.
-func executeIngressUpdate(namespace string) error {
-	fmt.Printf("   Executing ingress update script for namespace: %s\n", namespace)
-	fmt.Println("   DR cluster ingress hostname will be auto-detected from nginx LoadBalancer service")
-
-	scriptPath := "./scripts/update-ingress.sh"
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		return fmt.Errorf("ingress update script not found: %s", scriptPath)
-	}
-
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("NAMESPACE=%s", namespace),
-	)
-
-	if configuredKubeconfigPath != "" {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("KUBECONFIG=%s", configuredKubeconfigPath))
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ingress update script failed: %v\nOutput: %s", err, string(output))
-	}
-
-	fmt.Printf("   Ingress update script output:\n%s\n", string(output))
-	return nil
-}
-
 func ExecuteRestore() error {
 	env := GetEnvironment()
 
@@ -1378,17 +1390,13 @@ func ExecuteRestore() error {
 	}
 	fmt.Printf("   Permission restore completed successfully\n")
 
-	// Step 11: Update ingress rules for DR cluster
-	fmt.Println("\nSTEP 11: Updating Viya ingress rules for DR cluster")
-	fmt.Println("===================================================")
-	if err := executeIngressUpdate(namespace); err != nil {
-		return fmt.Errorf("ingress update failed: %v", err)
-	}
-	fmt.Printf("   Ingress update completed successfully\n")
-
-	// Step 12: Print final restore details
-	fmt.Println("\nSTEP 12: Restore completed successfully!")
+	// Step 11: Print final restore details
+	fmt.Println("\nSTEP 11: Restore completed successfully!")
 	fmt.Println("========================================")
+	fmt.Println("\n⚠️  MANUAL ACTION REQUIRED:")
+	fmt.Println("   Run the ingress update script to point ingress to the DR cluster:")
+	fmt.Printf("   cd azure && ./scripts/update-ingress.sh\n")
+	fmt.Println("   (or set NEW_INGRESS_HOST=<fqdn> ./scripts/update-ingress.sh for non-interactive)")
 	if err := printRestoreDetails(restoreName); err != nil {
 		fmt.Printf("   Warning: Failed to print restore details: %v\n", err)
 	}
@@ -1611,11 +1619,15 @@ func printRestoreDetails(restoreName string) error {
 	return nil
 }
 
-// applyCSINFSControllerPatch applies the CSI NFS controller patch to extend snapshot timeout
+// applyCSINFSControllerPatch applies the CSI NFS controller patch to extend snapshot timeout.
+// Applied before both backup and restore to prevent DeadlineExceeded on large NFS volumes.
 func applyCSINFSControllerPatch() error {
-	fmt.Printf("   Patching CSI NFS controller with extended timeout for restore operations...\n")
+	fmt.Printf("   Patching CSI NFS controller snapshotter timeout to 4800s (default is 1200s)...\n")
 
-	// Create the patch JSON
+	// Create the patch JSON — mirrors:
+	// kubectl patch deployment csi-nfs-controller -n kube-system --type=strategic \
+	//   -p='{"spec":{"template":{"spec":{"containers":[{"name":"csi-snapshotter",
+	//         "args":["-v=5","-csi-address=$(ADDRESS)","--leader-election","--timeout=4800s"]}]}}}}'
 	patchData := `{
 		"spec": {
 			"template": {
@@ -1626,8 +1638,8 @@ func applyCSINFSControllerPatch() error {
 							"args": [
 								"-v=5",
 								"-csi-address=$(ADDRESS)",
-								"-leader-election",
-								"-timeout=60m"
+								"--leader-election",
+								"--timeout=4800s"
 							]
 						}
 					]
@@ -1655,7 +1667,7 @@ func applyCSINFSControllerPatch() error {
 	}
 
 	fmt.Printf("   CSI NFS controller patched successfully\n")
-	fmt.Printf("   Extended snapshotter timeout to 60 minutes for large volume restores\n")
+	fmt.Printf("   csi-snapshotter timeout set to 4800s (prevents DeadlineExceeded on large NFS volumes)\n")
 
 	// Verify the patch was applied
 	fmt.Printf("   Verifying patch was applied...\n")
@@ -1668,8 +1680,8 @@ func applyCSINFSControllerPatch() error {
 		fmt.Printf("   Warning: Could not verify patch application: %v\n", verifyErr)
 	} else {
 		args := string(verifyOutput)
-		if strings.Contains(args, "timeout=60m") {
-			fmt.Printf("   ✅ Patch verified: CSI snapshotter timeout set to 60 minutes\n")
+		if strings.Contains(args, "timeout=4800s") {
+			fmt.Printf("   ✅ Patch verified: CSI snapshotter timeout set to 4800s\n")
 		} else {
 			fmt.Printf("   ⚠️  Warning: Patch may not have applied correctly. Args: %s\n", args)
 		}

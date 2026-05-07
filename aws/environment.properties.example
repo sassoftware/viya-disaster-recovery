@@ -1,0 +1,101 @@
+# Velero AWS Automation - Environment Configuration
+# =================================================
+# Configure these values according to your AWS environment and requirements
+# Copy this file to environment.properties and fill in your values:
+#   cp environment.properties.example environment.properties
+
+# AWS Configuration
+# -----------------
+REGION=us-east-1
+ACCOUNT_ID=your-aws-account-id
+
+# S3 Bucket for Velero Backups
+# ----------------------------
+# Note: S3 bucket names must be globally unique
+VELERO_BUCKET_NAME=your-velero-backup-bucket
+VELERO_BUCKET_REGION=us-east-1
+
+# Kubernetes Configuration
+# ------------------------
+KUBECONFIG_PATH=/path/to/admin/kubeconfig
+# Storage class used for the EFS/NFS permission backup PVC (must be an EBS-backed class)
+NFS_STORAGE_CLASS=efs-sc
+
+# EKS Cluster Configuration
+# -------------------------
+CLUSTER_NAME=your-eks-cluster-name
+EKS_CLUSTER_REGION=us-east-1
+
+# Viya Deployment Configuration
+# -----------------------------
+# Valid values: "nmt" (Non-Multi-Tenant) or "mt" (Multi-Tenant)
+# Note: Only "nmt" supports Velero backup operations
+VIYA_DEPLOYMENT_TYPE=nmt
+
+# Viya namespace to backup/restore
+VIYA_NAMESPACE=viya4
+
+# Cluster Type Configuration
+# -------------------------
+# Valid values: "source" or "restore"
+# Use "source" for backup operations, "restore" for restore operations
+CLUSTER_TYPE=source
+
+# IAM Role Configuration
+# ----------------------
+# Set USE_IAM_USER=true to use IAM user with access keys for Velero
+# Set USE_IAM_USER=false to use IRSA with IAM roles for Velero
+USE_IAM_USER=true
+
+# Velero IAM User (when USE_IAM_USER=true)
+VELERO_IAM_USER=velero-primary
+
+# EBS CSI Driver IAM Role (always created for addon)
+EBS_ROLE_NAME=your-ebs-csi-role
+EBS_POLICY_NAME=AmazonEBSCSIDriverPolicy
+EBS_CSI_VERSION=v1.52.1-eksbuild.1
+
+# Velero IAM Role (when USE_IAM_USER=false)
+VELERO_ROLE_NAME=your-velero-backup-role
+VELERO_SERVICE_ACCOUNT=velero
+
+# Install EBS CSI Addon
+INSTALL_EBS_CSI_ADDON=true
+
+# Velero Configuration
+# --------------------
+VELERO_NAMESPACE=velero
+VELERO_VERSION=v1.17.0
+VELERO_PLUGIN_VERSION=v1.13.0
+
+# Snapshot Configuration
+# ----------------------
+SNAPSHOT_CLASS_NAME=aws-ebs-snapshot-class
+
+# Backup Configuration
+# -------------------
+BACKUP_NAME_PREFIX=viya-backup
+RESTORE_NAME_PREFIX=viya-restore
+BACKUP_TTL=720h
+BACKUP_SNAPSHOT_VOLUMES=true
+BACKUP_WAIT=true
+BACKUP_EXCLUDE_NAMESPACES=kube-system,kube-public,kube-node-lease,velero
+
+# Restore Configuration
+# --------------------
+RESTORE_WAIT=true
+RESTORE_PVS=true
+
+# Advanced Configuration
+# ----------------------
+DEBUG_MODE=false
+SKIP_VALIDATION=false
+
+# Notes:
+# ------
+# 1. Remove the '#' at the beginning of a line to enable that configuration
+# 2. Values should not have quotes around them
+# 3. ACCOUNT_ID will be auto-detected if AWS CLI is configured
+# 4. OIDC provider ID will be auto-detected from EKS cluster
+# 5. For restore operations, set CLUSTER_TYPE=restore
+# 6. For backup operations, set CLUSTER_TYPE=source

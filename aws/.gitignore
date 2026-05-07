@@ -1,0 +1,34 @@
+# Binaries
+aws-viya4-dr
+aws-viya4-dr.exe
+aws-dr-automation
+
+# Environment configuration (contains sensitive values)
+environment.properties
+
+# State file (runtime state)
+state.json
+
+# Credentials directory
+credentials/
+aws-velero-credentials
+
+# JSON output files
+*.json
+!package.json
+
+# Go build cache
+*.test
+*.out
+vendor/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

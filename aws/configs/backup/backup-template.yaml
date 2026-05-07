@@ -1,0 +1,13 @@
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: BACKUP_NAME_PLACEHOLDER
+  namespace: velero
+spec:
+  includedNamespaces:
+    - NAMESPACE_PLACEHOLDER
+  snapshotVolumes: true
+  defaultVolumesToFsBackup: false
+  csiSnapshotTimeout: 4h
+  includeClusterResources: true
+  ttl: 720h0m0s

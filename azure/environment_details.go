@@ -108,11 +108,6 @@ func loadEnvironmentProperties() map[string]string {
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 
-				// Strip inline comments (e.g. KEY=value # comment -> value)
-				if commentIdx := strings.Index(value, " #"); commentIdx != -1 {
-					value = strings.TrimSpace(value[:commentIdx])
-				}
-
 				// Validate key format (only allow alphanumeric and underscore)
 				if key != "" && isValidPropertyKey(key) {
 					if value != "" {

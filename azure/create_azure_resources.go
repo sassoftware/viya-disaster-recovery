@@ -61,45 +61,16 @@ func CreateAzureResources(env Environment, state *State) error {
 
 	step = "Create Storage Account"
 	UpdateStepState(state, step, "IN-PROGRESS")
-
-	// Azure storage account names must be globally unique (3-24 lowercase alphanumeric).
-	// Check if the name is already taken before attempting creation.
-	existsOutput, existsErr := exec.Command("az", "storage", "account", "show",
+	fmt.Printf("Creating storage account: %s (Standard_GRS)\n", env.VeleroStoreName)
+	if err := RunCommand("az", "storage", "account", "create",
 		"--name", env.VeleroStoreName,
 		"--resource-group", env.VeleroBlobRG,
-		"--query", "name",
-		"--output", "tsv").Output()
-
-	if existsErr == nil && strings.TrimSpace(string(existsOutput)) == env.VeleroStoreName {
-		fmt.Printf("Storage account '%s' already exists in resource group '%s' — skipping creation.\n", env.VeleroStoreName, env.VeleroBlobRG)
-	} else {
-		// Check whether the name is taken globally by another subscription
-		availOutput, _ := exec.Command("az", "storage", "account", "check-name",
-			"--name", env.VeleroStoreName,
-			"--query", "nameAvailable",
-			"--output", "tsv").Output()
-
-		if strings.TrimSpace(string(availOutput)) == "false" {
-			UpdateStepState(state, step, "FAILED")
-			return fmt.Errorf(
-				"storage account name '%s' is already taken globally in Azure.\n"+
-					"  Azure storage account names must be globally unique (3-24 lowercase alphanumeric characters).\n"+
-					"  Please set a different VELERO_STORE_NAME in your environment.properties file and retry.\n"+
-					"  Tip: use a name that includes your org/project abbreviation, e.g. 'myorgvelerostore'",
-				env.VeleroStoreName)
-		}
-
-		fmt.Printf("Creating storage account: %s (Standard_GRS)\n", env.VeleroStoreName)
-		if err := RunCommand("az", "storage", "account", "create",
-			"--name", env.VeleroStoreName,
-			"--resource-group", env.VeleroBlobRG,
-			"--sku", "Standard_GRS",
-			"--encryption-services", "blob"); err != nil {
-			UpdateStepState(state, step, "FAILED")
-			return fmt.Errorf("failed to create storage account: %v", err)
-		}
-		fmt.Printf("Created storage account: %s in %s\n", env.VeleroStoreName, env.VeleroBlobRG)
+		"--sku", "Standard_GRS",
+		"--encryption-services", "blob"); err != nil {
+		UpdateStepState(state, step, "FAILED")
+		return fmt.Errorf("failed to create storage account: %v", err)
 	}
+	fmt.Printf("Created storage account: %s in %s\n", env.VeleroStoreName, env.VeleroBlobRG)
 	UpdateStepState(state, step, "SUCCESS")
 
 	step = "Create Storage Container"

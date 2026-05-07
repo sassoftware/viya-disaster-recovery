@@ -1,0 +1,8 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: aws-nfs-snapshot-class
+  labels:
+    velero.io/csi-volumesnapshot-class: "true"
+driver: nfs.csi.k8s.io
+deletionPolicy: Delete

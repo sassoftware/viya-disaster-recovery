@@ -1,0 +1,34 @@
+# Binaries
+velero-automation
+velero-automation.exe
+viya-health-minimal
+viya-health-minimal.exe
+
+# State and runtime files
+state.json
+*.log
+
+# Credentials (never commit)
+credentials/
+!credentials/.gitkeep
+
+# Generated backup/restore configs
+configs/backup/*.yaml
+!configs/backup/backup-template.yaml
+!configs/backup/README.md
+
+configs/restore/azure-velero-credentials
+!configs/restore/restore-template.yaml
+!configs/restore/velero-priorityclass.yaml
+!configs/restore/README.md
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

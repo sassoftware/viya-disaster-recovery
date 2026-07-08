@@ -1,0 +1,54 @@
+# =======================================================
+# environment.properties - HPOS / OpenStack DR Cluster
+# =======================================================
+
+# Kubernetes Configuration
+KUBECONFIG_PATH=/path/to/admin/kubeconfig
+VIYA_NAMESPACE=viya
+NFS_STORAGE_CLASS=sas
+NFS_SNAPSHOT_CLASS=nfs-snapshot-class
+SNAPSHOTTER_VERSION=v8.4.0
+
+# Viya Deployment Configuration
+# Valid values: nmt only for Velero backup/restore
+VIYA_DEPLOYMENT_TYPE=nmt
+
+# Cluster Type Configuration
+# Valid values: source or restore
+CLUSTER_TYPE=source
+
+# libreFS / S3-compatible object storage
+# install mode: skip, local, or remote
+LIBREFS_INSTALL_MODE=skip
+LIBREFS_ENDPOINT=http://10.119.100.227:9000
+LIBREFS_BUCKET=velero
+LIBREFS_ACCESS_KEY=velero
+LIBREFS_SECRET_KEY=velero12345
+LIBREFS_BINARY_PATH=./librefs-linux-amd64
+LIBREFS_OPT_DIR=/opt/librefs
+LIBREFS_DATA_DIR=/data/librefs
+LIBREFS_USER=librefs
+LIBREFS_SERVICE_NAME=librefs
+LIBREFS_CONSOLE_ADDRESS=:9001
+LIBREFS_API_PORT=9000
+LIBREFS_CONSOLE_PORT=9001
+
+# Use these only when LIBREFS_INSTALL_MODE=remote
+LIBREFS_REMOTE_HOST=
+LIBREFS_REMOTE_USER=rocky
+LIBREFS_REMOTE_KEY_PATH=
+
+# Velero Configuration
+VELERO_NAMESPACE=velero
+VELERO_PROVIDER=aws
+VELERO_PLUGIN=velero/velero-plugin-for-aws:v1.12.1
+VELERO_BUCKET=velero
+
+# Backup / Restore
+# Use BACKUP_NAME=auto to generate timestamped backup names
+BACKUP_NAME=viya-full-backup
+RESTORE_NAME=viya-restore
+
+# Generated locally and required for restore from the same working directory
+CREDENTIALS_DIR=credentials
+CREDENTIALS_FILE=velero-creds-local

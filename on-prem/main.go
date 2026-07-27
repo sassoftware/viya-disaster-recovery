@@ -12,6 +12,8 @@ func main() {
 	steps := flag.String("steps", "", "Comma-separated setup steps: hpos,kubernetes,velero")
 	backup := flag.Bool("backup", false, "Create Velero backup")
 	restore := flag.Bool("restore", false, "Create Velero restore")
+	destroy := flag.Bool("destroy", false, "Destroy HPOS teardown resources (Velero and libreFS bucket)")
+	cleanup := flag.Bool("cleanup", false, "Alias for --destroy")
 	check := flag.Bool("check", false, "Check Kubernetes connectivity")
 	debug := flag.Bool("debug", false, "Enable debug command logging")
 	flag.Parse()
@@ -53,11 +55,23 @@ func main() {
 	if *restore {
 		fatalIf(createRestore(cfg, r))
 	}
-	if *steps == "" && !*backup && !*restore && !*check {
+	if *destroy || *cleanup {
+		s := LoadState()
+		s.Mark("destroy", "started")
+		err = cleanupDestroyResources(cfg, r)
+		s = LoadState()
+		if err != nil {
+			s.Mark("destroy", "partial")
+			fatalIf(err)
+		}
+		s.Mark("destroy", "completed")
+	}
+	if *steps == "" && !*backup && !*restore && !*check && !*destroy && !*cleanup {
 		fmt.Println("Usage:")
 		fmt.Println("  ./viya-dr-automation-hpos --steps=hpos,kubernetes,velero")
 		fmt.Println("  ./viya-dr-automation-hpos --backup")
 		fmt.Println("  ./viya-dr-automation-hpos --restore")
+		fmt.Println("  ./viya-dr-automation-hpos --destroy")
 		fmt.Println("  ./viya-dr-automation-hpos --check")
 	}
 }

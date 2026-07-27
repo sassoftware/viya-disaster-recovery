@@ -45,6 +45,14 @@ Use individual steps when you want full visibility and easy re-run of a failed p
 ./viya-dr-automation-hpos --backup --debug
 ```
 
+Backup workflow sequence:
+
+1. Run `scripts/backup_permission.sh`.
+2. Start Velero backup.
+3. Print a status summary table and final summary.
+
+If the permission backup script fails, backup stops and exits with failure.
+
 The backup operation creates a local `credentials/` directory containing the S3 credentials file used by Velero. Preserve this directory and `state.json` for restore.
 
 ```text
@@ -69,6 +77,75 @@ Before restore, update `environment.properties`:
 ./viya-dr-automation-hpos --restore
 ./viya-dr-automation-hpos --restore --debug
 ```
+
+Restore workflow sequence:
+
+1. Start Velero restore.
+2. Complete restore describe/verification step.
+3. Run `scripts/restore_permission.sh`.
+4. Print a status summary table and final summary.
+
+If permission restore fails, diagnostics and exit code are reported clearly.
+
+## Permission Script Files
+
+The following scripts are integrated into the DR workflow:
+
+- `scripts/backup_permission.sh` (canonical entrypoint)
+- `scripts/restore_permission.sh` (canonical entrypoint)
+
+Execution prerequisites validated by the automation:
+
+- Script file exists
+- Script file is executable
+- Required parameters are present
+
+Status summary format:
+
+```text
+Component | Phase | Action | Status | Exit Code
+```
+
+Final summary fields:
+
+- Permission Backup
+- Restore Permissions
+- Overall DR Operation
+
+## Destroy Cleanup Operations
+
+Use destroy cleanup to tear down Velero resources and the configured libreFS bucket.
+
+```bash
+./viya-dr-automation-hpos --destroy
+# alias:
+./viya-dr-automation-hpos --cleanup
+```
+
+Destroy cleanup behavior:
+
+- Removes Velero resources in the configured `VELERO_NAMESPACE`.
+- Deletes all objects from `LIBREFS_BUCKET` and then deletes the bucket.
+- Is idempotent and safe to rerun.
+- Continues when resources are already missing.
+- Prints a cleanup report in this format:
+
+```text
+<Resource> | <Type> | <Action> | <Status>
+```
+
+Status values:
+
+- `Deleted`
+- `Not Found`
+- `Skipped`
+- `Failed`
+
+A final cleanup summary is printed as one of:
+
+- `Success`
+- `Partial Success`
+- `Failed`
 
 ## Sample restore environment.properties
 

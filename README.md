@@ -89,6 +89,42 @@ go build -tags health -o viya-health-checker .
 
 ---
 
+### ✅ HPOS (On-Prem / OpenStack)
+
+Complete Velero DR automation for HPOS/OpenStack environments using libreFS as an S3-compatible object store.
+
+**Location:** [`on-prem/`](on-prem/) — see [on-prem/README.md](on-prem/README.md)
+
+| Feature | Status |
+|---------|--------|
+| HPOS infrastructure setup (libreFS local/remote/skip modes) | ✅ |
+| CSI snapshot classes for NFS volumes | ✅ |
+| Permission backup/restore script integration in DR workflow | ✅ |
+| Velero install + node-agent with SAS tolerations | ✅ |
+| Cross-cluster restore with credential/state reuse | ✅ |
+| NFS permission preservation (backup + restore) | ✅ |
+| Post-restore ingress host + TLS patching | ✅ |
+| Destroy cleanup for Velero resources and libreFS bucket | ✅ |
+| SAS Viya health monitoring | ✅ |
+
+```bash
+cd on-prem
+go build -o viya-dr-automation-hpos .
+./viya-dr-automation-hpos --help
+
+# Backup
+./viya-dr-automation-hpos --backup
+
+# Restore
+./viya-dr-automation-hpos --restore
+
+# Health checker (integrated)
+go build -tags health -o viya-health-checker .
+./viya-health-checker
+```
+
+---
+
 ### ✅ SAS Viya Health Checker (Standalone)
 
 An independent health monitoring tool that works with **any** Kubernetes cluster — Azure, AWS, or on-premises. No DR workflow required.

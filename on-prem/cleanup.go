@@ -238,6 +238,9 @@ func isNotFoundError(message string) bool {
 	patterns := []string{
 		"not found",
 		"no resources found",
+		"the server doesn't have a resource type",
+		"the server could not find the requested resource",
+		"no matches for kind",
 		"nosuchbucket",
 		"404",
 		"status code: 404",

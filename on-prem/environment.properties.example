@@ -3,7 +3,7 @@
 # =======================================================
 
 # Kubernetes Configuration
-KUBECONFIG_PATH=/path/to/admin/kubeconfig
+KUBECONFIG_PATH=/u/qstauto/.kube/auto/psdrs -m1.pscloud-iac-1.hpos5.rnd.sas.com/kubeconfig
 VIYA_NAMESPACE=viya
 NFS_STORAGE_CLASS=sas
 NFS_SNAPSHOT_CLASS=nfs-snapshot-class
@@ -19,11 +19,12 @@ CLUSTER_TYPE=source
 
 # libreFS / S3-compatible object storage
 # install mode: skip, local, or remote
+# skip = use existing libreFS, local = install on this host, remote = install on LIBREFS_REMOTE_HOST
 LIBREFS_INSTALL_MODE=skip
 LIBREFS_ENDPOINT=http://10.119.100.227:9000
 LIBREFS_BUCKET=velero
-LIBREFS_ACCESS_KEY=velero
-LIBREFS_SECRET_KEY=velero12345
+LIBREFS_ACCESS_KEY=minio
+LIBREFS_SECRET_KEY=minioadmin
 LIBREFS_BINARY_PATH=./librefs-linux-amd64
 LIBREFS_OPT_DIR=/opt/librefs
 LIBREFS_DATA_DIR=/data/librefs

@@ -21,6 +21,7 @@ const (
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
 	veleroCredentialSecretName  = "cloud-credentials"
+	backupDiscoveryTimeout      = 3 * time.Minute
 )
 
 type operationStatus struct {
@@ -167,7 +168,7 @@ func createBackup(cfg *Config, r Runner) error {
 }
 
 func createRestore(cfg *Config, r Runner) error {
-	report := make([]operationStatus, 0, 6)
+	report := make([]operationStatus, 0, 7)
 	permissionBackupStatus := "Skipped"
 	restorePermissionStatus := "Skipped"
 
@@ -189,17 +190,20 @@ func createRestore(cfg *Config, r Runner) error {
 	}
 	report = append(report, preflightRow)
 
-	availableBackups, err := fetchVeleroBackups(cfg, r)
-	selectionRow := operationStatus{Component: "Backup Selection", Phase: "Restore Phase", Action: "Selected", Status: "Success", ExitCode: 0}
+	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Discovered", Status: "Success", ExitCode: 0}
+	availableBackups, err := waitForBackupsDiscovered(cfg, r, backupDiscoveryTimeout, veleroPollInterval)
 	if err != nil {
-		selectionRow.Status = "Failed"
-		selectionRow.ExitCode = extractExitCode(err)
-		report = append(report, selectionRow)
+		discoveryRow.Status = "Failed"
+		discoveryRow.ExitCode = extractExitCode(err)
+		report = append(report, discoveryRow)
 		printOperationReport(report)
 		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
+	report = append(report, discoveryRow)
+	printAvailableBackups(availableBackups)
 
+	selectionRow := operationStatus{Component: "Backup Selection", Phase: "Restore Phase", Action: "Selected", Status: "Success", ExitCode: 0}
 	backup, err := selectBackupForRestore(cfg, availableBackups)
 	if err != nil {
 		selectionRow.Status = "Failed"
@@ -294,12 +298,45 @@ func ensureVeleroReadyForRestore(cfg *Config, r Runner) error {
 		return err
 	}
 
-	if _, err := fetchVeleroBackups(cfg, r); err != nil {
-		return err
-	}
-
 	fmt.Println("Velero preflight checks passed")
 	return nil
+}
+
+func waitForBackupsDiscovered(cfg *Config, r Runner, timeout, interval time.Duration) ([]veleroBackupSummary, error) {
+	fmt.Printf("Waiting for backups to be discovered (timeout %s)...\n", timeout)
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	var lastErr error
+
+	for {
+		attempt++
+		out, err := runCommandCapture(r, "velero", "backup", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+		if err == nil {
+			backups, parseErr := parseVeleroBackups(out)
+			if parseErr != nil {
+				lastErr = parseErr
+			} else if len(backups) > 0 {
+				fmt.Printf("Discovered %d backup(s) in Velero storage.\n", len(backups))
+				return backups, nil
+			} else {
+				lastErr = fmt.Errorf("no backups discovered yet")
+			}
+		} else {
+			lastErr = err
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		fmt.Printf("No backups available yet (attempt %d). Retrying in %s (remaining %s).\n", attempt, interval, remaining.Round(time.Second))
+		time.Sleep(interval)
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("backup discovery timed out")
+	}
+	return nil, fmt.Errorf("failed waiting for Velero backups after %s: %w", timeout, lastErr)
 }
 
 func ensureExistingVeleroCredentialsFile(cfg *Config) (string, []byte, error) {
@@ -527,6 +564,19 @@ func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to fetch Velero backups: %w", err)
 	}
+	backups, err := parseVeleroBackups(out)
+	if err != nil {
+		return nil, err
+	}
+	if len(backups) == 0 {
+		return nil, fmt.Errorf("no Velero backups found in storage")
+	}
+
+	printAvailableBackups(backups)
+	return backups, nil
+}
+
+func parseVeleroBackups(out string) ([]veleroBackupSummary, error) {
 
 	type backupList struct {
 		Items []struct {
@@ -551,9 +601,6 @@ func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		return nil, fmt.Errorf("failed to parse Velero backup list: %w", err)
 	}
-	if len(parsed.Items) == 0 {
-		return nil, fmt.Errorf("no Velero backups found in storage")
-	}
 
 	backups := make([]veleroBackupSummary, 0, len(parsed.Items))
 	for _, item := range parsed.Items {
@@ -571,8 +618,6 @@ func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
 			StorageName: strings.TrimSpace(item.Spec.StorageLocation),
 		})
 	}
-
-	printAvailableBackups(backups)
 	return backups, nil
 }
 

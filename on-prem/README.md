@@ -88,13 +88,14 @@ Restore credential prerequisites:
 
 Restore workflow sequence:
 
-1. Run Velero preflight checks (CLI, CRDs, deployment, backup storage access).
-2. If Velero is missing or not configured, run automated Velero setup.
-3. Fetch and display available backups from Velero storage.
-4. Select backup interactively and validate `Completed` phase.
-5. Start Velero restore and monitor until terminal phase.
-6. Run `scripts/restore_permission.sh` only after successful restore completion.
-7. Print progress, status summary, and final summary.
+1. Install or verify Velero on the restore cluster.
+2. Verify Velero `BackupStorageLocation` is healthy and accessible.
+3. Wait for backups to be discovered in Velero.
+4. List available backups.
+5. Select backup interactively and validate `Completed` phase.
+6. Start Velero restore and monitor until terminal phase.
+7. Run `scripts/restore_permission.sh` only after successful restore completion.
+8. Print progress, status summary, and final summary.
 
 If permission restore fails, diagnostics and exit code are reported clearly.
 

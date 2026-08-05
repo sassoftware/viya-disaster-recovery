@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,6 +19,7 @@ const (
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
+	veleroCredentialSecretName  = "cloud-credentials"
 )
 
 type operationStatus struct {
@@ -41,6 +45,16 @@ type veleroOperationResult struct {
 	Warnings  string
 	Errors    string
 	Duration  time.Duration
+}
+
+type veleroBackupSummary struct {
+	Name        string
+	Phase       string
+	Created     string
+	Completed   string
+	Warnings    string
+	Errors      string
+	StorageName string
 }
 
 func setupVelero(cfg *Config, r Runner) error {
@@ -152,7 +166,7 @@ func createBackup(cfg *Config, r Runner) error {
 }
 
 func createRestore(cfg *Config, r Runner) error {
-	report := make([]operationStatus, 0, 4)
+	report := make([]operationStatus, 0, 6)
 	permissionBackupStatus := "Skipped"
 	restorePermissionStatus := "Skipped"
 
@@ -162,20 +176,46 @@ func createRestore(cfg *Config, r Runner) error {
 	if err := os.Setenv("KUBECONFIG", cfg.KubeconfigPath); err != nil {
 		return err
 	}
-	backup := cfg.BackupName
-	if strings.TrimSpace(backup) == "" || backup == "auto" {
-		state := LoadState()
-		backup = state.BackupName
+
+	preflightRow := operationStatus{Component: "Velero Preflight", Phase: "Restore Phase", Action: "Validated", Status: "Success", ExitCode: 0}
+	if err := ensureVeleroReadyForRestore(cfg, r); err != nil {
+		preflightRow.Status = "Failed"
+		preflightRow.ExitCode = extractExitCode(err)
+		report = append(report, preflightRow)
+		printOperationReport(report)
+		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		return err
 	}
-	if strings.TrimSpace(backup) == "" {
-		return fmt.Errorf("BACKUP_NAME is required for restore or state.json must contain backupName")
+	report = append(report, preflightRow)
+
+	availableBackups, err := fetchVeleroBackups(cfg, r)
+	selectionRow := operationStatus{Component: "Backup Selection", Phase: "Restore Phase", Action: "Selected", Status: "Success", ExitCode: 0}
+	if err != nil {
+		selectionRow.Status = "Failed"
+		selectionRow.ExitCode = extractExitCode(err)
+		report = append(report, selectionRow)
+		printOperationReport(report)
+		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		return err
 	}
+
+	backup, err := selectBackupForRestore(cfg, availableBackups)
+	if err != nil {
+		selectionRow.Status = "Failed"
+		selectionRow.ExitCode = extractExitCode(err)
+		report = append(report, selectionRow)
+		printOperationReport(report)
+		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		return err
+	}
+	report = append(report, selectionRow)
+
 	restore := cfg.RestoreName
 	if strings.TrimSpace(restore) == "" || restore == "auto" {
 		restore = "viya-restore-" + time.Now().Format("20060102-150405")
 	}
 	args := []string{"restore", "create", restore,
-		"--from-backup", backup,
+		"--from-backup", backup.Name,
 		"--include-cluster-resources=true",
 		"--namespace", cfg.VeleroNamespace,
 	}
@@ -191,6 +231,7 @@ func createRestore(cfg *Config, r Runner) error {
 	report = append(report, veleroRestoreRow)
 
 	state := LoadState()
+	state.BackupName = backup.Name
 	state.RestoreName = restore
 	_ = state.Mark("restore", "created")
 
@@ -220,6 +261,329 @@ func createRestore(cfg *Config, r Runner) error {
 	printOperationReport(report)
 	printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 	return nil
+}
+
+func ensureVeleroReadyForRestore(cfg *Config, r Runner) error {
+	if _, err := exec.LookPath("velero"); err != nil {
+		return fmt.Errorf("velero CLI not found in PATH: %w", err)
+	}
+	credPath, err := ensureExistingVeleroCredentialsFile(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Using existing Velero credentials file for restore: %s\n", credPath)
+
+	if err := checkVeleroClusterPrerequisites(cfg, r); err == nil {
+		fmt.Println("Velero preflight checks passed")
+		return nil
+	}
+
+	fmt.Println("Velero is not fully installed or configured; attempting restore-safe automatic setup (no credential file or secret mutation)...")
+	if err := setupVeleroForRestore(cfg, r); err != nil {
+		return fmt.Errorf("failed to install/configure Velero automatically: %w", err)
+	}
+
+	if err := checkVeleroClusterPrerequisites(cfg, r); err != nil {
+		return fmt.Errorf("Velero setup completed but preflight still failing: %w", err)
+	}
+	fmt.Println("Velero setup completed and preflight checks passed")
+	return nil
+}
+
+func ensureExistingVeleroCredentialsFile(cfg *Config) (string, error) {
+	credPath := filepath.Join(cfg.CredentialsDir, cfg.CredentialsFile)
+	info, err := os.Stat(credPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("existing Velero credentials file is required for restore but was not found at %s", credPath)
+		}
+		return "", fmt.Errorf("unable to access existing Velero credentials file %s: %w", credPath, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("credentials path is a directory, expected file: %s", credPath)
+	}
+	if _, err := os.ReadFile(credPath); err != nil {
+		return "", fmt.Errorf("unable to read existing Velero credentials file %s: %w", credPath, err)
+	}
+	return credPath, nil
+}
+
+func setupVeleroForRestore(cfg *Config, r Runner) error {
+	if err := os.Setenv("KUBECONFIG", cfg.KubeconfigPath); err != nil {
+		return err
+	}
+
+	if err := ensureVeleroCredentialSecretExists(cfg, r); err != nil {
+		return err
+	}
+
+	args := []string{
+		"install",
+		"--features=EnableCSI",
+		"--use-node-agent",
+		"--default-snapshot-move-data",
+		"--provider", cfg.VeleroProvider,
+		"--plugins", cfg.VeleroPlugin,
+		"--bucket", cfg.LibrefsBucket,
+		"--use-volume-snapshots=true",
+		"--backup-location-config", fmt.Sprintf("region=minio,s3ForcePathStyle=true,s3Url=%s", cfg.LibrefsEndpoint),
+		"--no-secret",
+		"--namespace", cfg.VeleroNamespace,
+	}
+	if err := r.Run("velero", args...); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			fmt.Println("Velero appears to be already installed; continuing")
+		} else {
+			return err
+		}
+	}
+
+	if err := ensureVeleroCredentialSecretExists(cfg, r); err != nil {
+		return err
+	}
+
+	return r.Run("velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace)
+}
+
+func ensureVeleroCredentialSecretExists(cfg *Config, r Runner) error {
+	if _, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "secret", veleroCredentialSecretName); err != nil {
+		return fmt.Errorf("required existing Velero credentials secret %s/%s not found; restore will not create or replace credentials", cfg.VeleroNamespace, veleroCredentialSecretName)
+	}
+	return nil
+}
+
+func checkVeleroClusterPrerequisites(cfg *Config, r Runner) error {
+	if err := ensureVeleroCRDs(r); err != nil {
+		return err
+	}
+	if err := ensureVeleroDeployment(cfg, r); err != nil {
+		return err
+	}
+	if err := ensureBackupStorageLocationAccessible(cfg, r); err != nil {
+		return err
+	}
+	if _, err := fetchVeleroBackups(cfg, r); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureVeleroCRDs(r Runner) error {
+	crds := []string{"backups.velero.io", "restores.velero.io", "backupstoragelocations.velero.io"}
+	for _, crd := range crds {
+		if _, err := runCommandCapture(r, "kubectl", "get", "crd", crd); err != nil {
+			return fmt.Errorf("required Velero CRD %s is missing: %w", crd, err)
+		}
+	}
+	return nil
+}
+
+func ensureVeleroDeployment(cfg *Config, r Runner) error {
+	if _, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "deployment", "velero"); err != nil {
+		return fmt.Errorf("velero deployment not found in namespace %s: %w", cfg.VeleroNamespace, err)
+	}
+	if _, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "wait", "--for=condition=Available", "deployment/velero", "--timeout=180s"); err != nil {
+		return fmt.Errorf("velero deployment is not available: %w", err)
+	}
+	return nil
+}
+
+func ensureBackupStorageLocationAccessible(cfg *Config, r Runner) error {
+	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	if err != nil {
+		return fmt.Errorf("unable to query Velero backup storage locations: %w", err)
+	}
+
+	type bslList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Phase   string `json:"phase"`
+				Message string `json:"message"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	var parsed bslList
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return fmt.Errorf("failed to parse backup storage location output: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		return fmt.Errorf("no Velero backup storage locations found in namespace %s", cfg.VeleroNamespace)
+	}
+
+	hasAvailable := false
+	problems := make([]string, 0, len(parsed.Items))
+	for _, item := range parsed.Items {
+		phase := strings.TrimSpace(item.Status.Phase)
+		if strings.EqualFold(phase, "Available") {
+			hasAvailable = true
+			continue
+		}
+		problem := fmt.Sprintf("%s phase=%s", item.Metadata.Name, phase)
+		if strings.TrimSpace(item.Status.Message) != "" {
+			problem = fmt.Sprintf("%s message=%s", problem, strings.TrimSpace(item.Status.Message))
+		}
+		problems = append(problems, problem)
+	}
+
+	if !hasAvailable {
+		return fmt.Errorf("no accessible Velero backup storage location found: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
+	out, err := runCommandCapture(r, "velero", "backup", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch Velero backups: %w", err)
+	}
+
+	type backupList struct {
+		Items []struct {
+			Metadata struct {
+				Name              string `json:"name"`
+				CreationTimestamp string `json:"creationTimestamp"`
+			} `json:"metadata"`
+			Spec struct {
+				StorageLocation string `json:"storageLocation"`
+			} `json:"spec"`
+			Status struct {
+				Phase               string      `json:"phase"`
+				Warnings            interface{} `json:"warnings"`
+				Errors              interface{} `json:"errors"`
+				StartTimestamp      string      `json:"startTimestamp"`
+				CompletionTimestamp string      `json:"completionTimestamp"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	var parsed backupList
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse Velero backup list: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		return nil, fmt.Errorf("no Velero backups found in storage")
+	}
+
+	backups := make([]veleroBackupSummary, 0, len(parsed.Items))
+	for _, item := range parsed.Items {
+		created := strings.TrimSpace(item.Metadata.CreationTimestamp)
+		if created == "" {
+			created = strings.TrimSpace(item.Status.StartTimestamp)
+		}
+		backups = append(backups, veleroBackupSummary{
+			Name:        item.Metadata.Name,
+			Phase:       strings.TrimSpace(item.Status.Phase),
+			Created:     created,
+			Completed:   strings.TrimSpace(item.Status.CompletionTimestamp),
+			Warnings:    strings.TrimSpace(fmt.Sprint(item.Status.Warnings)),
+			Errors:      strings.TrimSpace(fmt.Sprint(item.Status.Errors)),
+			StorageName: strings.TrimSpace(item.Spec.StorageLocation),
+		})
+	}
+
+	printAvailableBackups(backups)
+	return backups, nil
+}
+
+func printAvailableBackups(backups []veleroBackupSummary) {
+	fmt.Println("\nAvailable Velero backups")
+	fmt.Println("# | Name | Phase | Created | Warnings | Errors")
+	for i, backup := range backups {
+		fmt.Printf("%d | %s | %s | %s | %s | %s\n", i+1, backup.Name, emptyAsNA(backup.Phase), emptyAsNA(backup.Created), emptyAsNA(backup.Warnings), emptyAsNA(backup.Errors))
+	}
+}
+
+func selectBackupForRestore(cfg *Config, backups []veleroBackupSummary) (veleroBackupSummary, error) {
+	preferredName := strings.TrimSpace(cfg.BackupName)
+	if preferredName == "" || strings.EqualFold(preferredName, "auto") {
+		state := LoadState()
+		preferredName = strings.TrimSpace(state.BackupName)
+	}
+
+	nameToIndex := make(map[string]int, len(backups))
+	for i := range backups {
+		nameToIndex[backups[i].Name] = i
+	}
+
+	completedIndexes := make([]int, 0, len(backups))
+	for i := range backups {
+		if strings.EqualFold(backups[i].Phase, "Completed") {
+			completedIndexes = append(completedIndexes, i)
+		}
+	}
+	if len(completedIndexes) == 0 {
+		return veleroBackupSummary{}, fmt.Errorf("no backups are in Completed phase; cannot start restore")
+	}
+
+	stdinInfo, err := os.Stdin.Stat()
+	if err != nil {
+		return veleroBackupSummary{}, fmt.Errorf("unable to inspect stdin for interactive backup selection: %w", err)
+	}
+	if stdinInfo.Mode()&os.ModeCharDevice == 0 {
+		if preferredName != "" {
+			if idx, ok := nameToIndex[preferredName]; ok {
+				if strings.EqualFold(backups[idx].Phase, "Completed") {
+					fmt.Printf("\nSelected configured backup (non-interactive mode): %s\n", preferredName)
+					return backups[idx], nil
+				}
+				return veleroBackupSummary{}, fmt.Errorf("configured backup %s has phase %s; restore requires Completed backup", preferredName, backups[idx].Phase)
+			}
+			return veleroBackupSummary{}, fmt.Errorf("configured backup %s not found among available backups", preferredName)
+		}
+		return veleroBackupSummary{}, fmt.Errorf("interactive backup selection requires a terminal")
+	}
+
+	defaultIndex := completedIndexes[0]
+	if preferredName != "" {
+		if idx, ok := nameToIndex[preferredName]; ok {
+			if strings.EqualFold(backups[idx].Phase, "Completed") {
+				defaultIndex = idx
+				fmt.Printf("\nDefaulting to configured backup: %s\n", preferredName)
+			} else {
+				fmt.Printf("\nConfigured backup %s has phase %s. Select a Completed backup.\n", preferredName, backups[idx].Phase)
+			}
+		} else {
+			fmt.Printf("\nConfigured backup %s not found; select from available backups.\n", preferredName)
+		}
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("\nSelect backup number to restore [%d]: ", defaultIndex+1)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return veleroBackupSummary{}, fmt.Errorf("failed to read backup selection: %w", err)
+		}
+		input = strings.TrimSpace(input)
+		if input == "" {
+			return backups[defaultIndex], nil
+		}
+
+		selectedNumber, err := strconv.Atoi(input)
+		if err != nil || selectedNumber < 1 || selectedNumber > len(backups) {
+			fmt.Printf("Invalid selection: %s. Enter a number between 1 and %d.\n", input, len(backups))
+			continue
+		}
+
+		candidate := backups[selectedNumber-1]
+		if !strings.EqualFold(candidate.Phase, "Completed") {
+			fmt.Printf("Backup %s is in phase %s. Please select a backup in Completed phase.\n", candidate.Name, candidate.Phase)
+			continue
+		}
+		return candidate, nil
+	}
+}
+
+func emptyAsNA(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "N/A"
+	}
+	return trimmed
 }
 
 func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (veleroOperationResult, error) {

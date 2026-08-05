@@ -73,6 +73,12 @@ Before restore, update `environment.properties`:
 3. Keep `LIBREFS_ENDPOINT`, `LIBREFS_BUCKET`, `LIBREFS_ACCESS_KEY`, and `LIBREFS_SECRET_KEY` matching the source backup setup.
 4. Run from the same working directory that contains `credentials/` and `state.json`, or explicitly set `BACKUP_NAME`.
 
+Restore credential prerequisites:
+
+- Restore requires an existing credentials file at `CREDENTIALS_DIR/CREDENTIALS_FILE`.
+- Restore requires an existing Velero credentials secret `cloud-credentials` in `VELERO_NAMESPACE`.
+- Restore does not create, replace, or rotate the credentials file or Velero credentials secret.
+
 ```bash
 ./viya-dr-automation-hpos --restore
 ./viya-dr-automation-hpos --restore --debug
@@ -80,10 +86,13 @@ Before restore, update `environment.properties`:
 
 Restore workflow sequence:
 
-1. Start Velero restore.
-2. Complete restore describe/verification step.
-3. Run `scripts/restore_permission.sh`.
-4. Print a status summary table and final summary.
+1. Run Velero preflight checks (CLI, CRDs, deployment, backup storage access).
+2. If Velero is missing or not configured, run automated Velero setup.
+3. Fetch and display available backups from Velero storage.
+4. Select backup interactively and validate `Completed` phase.
+5. Start Velero restore and monitor until terminal phase.
+6. Run `scripts/restore_permission.sh` only after successful restore completion.
+7. Print progress, status summary, and final summary.
 
 If permission restore fails, diagnostics and exit code are reported clearly.
 

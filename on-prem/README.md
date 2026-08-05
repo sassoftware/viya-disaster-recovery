@@ -77,9 +77,8 @@ Restore credential prerequisites:
 
 - Restore requires an existing credentials file at `CREDENTIALS_DIR/CREDENTIALS_FILE`.
 - Restore treats the credentials file as the source of truth.
-- If the Velero credentials secret `cloud-credentials` is missing, restore creates it from the credentials file.
-- If the secret exists but differs, restore updates it from the credentials file.
-- Restore never generates a new credentials file and reuses the existing backup/source-cluster credentials file.
+- Restore reuses the existing backup/source-cluster credentials file and runs Velero install with `--secret-file`.
+- Restore does not create a new credentials file path and uses the configured `CREDENTIALS_DIR/CREDENTIALS_FILE` values.
 
 ```bash
 ./viya-dr-automation-hpos --restore
@@ -126,7 +125,7 @@ Final summary fields:
 
 ## Destroy Cleanup Operations
 
-Use destroy cleanup to tear down Velero resources and the configured libreFS bucket.
+Use destroy cleanup to uninstall Velero and delete the Velero namespace.
 
 ```bash
 ./viya-dr-automation-hpos --destroy
@@ -136,28 +135,10 @@ Use destroy cleanup to tear down Velero resources and the configured libreFS buc
 
 Destroy cleanup behavior:
 
-- Removes Velero resources in the configured `VELERO_NAMESPACE`.
-- Deletes all objects from `LIBREFS_BUCKET` and then deletes the bucket.
-- Is idempotent and safe to rerun.
-- Continues when resources are already missing.
-- Prints a cleanup report in this format:
-
-```text
-<Resource> | <Type> | <Action> | <Status>
-```
-
-Status values:
-
-- `Deleted`
-- `Not Found`
-- `Skipped`
-- `Failed`
-
-A final cleanup summary is printed as one of:
-
-- `Success`
-- `Partial Success`
-- `Failed`
+- Runs `velero uninstall --force` for the configured namespace.
+- Deletes the configured `VELERO_NAMESPACE`.
+- Waits until namespace deletion completes.
+- Returns success when namespace deletion succeeds.
 
 ## Sample restore environment.properties
 

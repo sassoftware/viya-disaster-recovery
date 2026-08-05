@@ -41,9 +41,6 @@ LIBREFS_REMOTE_KEY_PATH=
 
 # Velero Configuration
 VELERO_NAMESPACE=velero
-# Optional: override when BackupStorageLocation binds to a non-default credential secret.
-# If empty, restore discovers the secret name from BackupStorageLocation, then falls back to cloud-credentials.
-VELERO_CREDENTIAL_SECRET_NAME=
 VELERO_PROVIDER=aws
 VELERO_PLUGIN=velero/velero-plugin-for-aws:v1.12.1
 VELERO_BUCKET=velero

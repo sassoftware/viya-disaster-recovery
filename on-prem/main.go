@@ -12,7 +12,7 @@ func main() {
 	steps := flag.String("steps", "", "Comma-separated setup steps: hpos,kubernetes,velero")
 	backup := flag.Bool("backup", false, "Create Velero backup")
 	restore := flag.Bool("restore", false, "Create Velero restore")
-	destroy := flag.Bool("destroy", false, "Destroy HPOS teardown resources (Velero and libreFS bucket)")
+	destroy := flag.Bool("destroy", false, "Cleanup Velero resources by uninstalling Velero and deleting its namespace")
 	cleanup := flag.Bool("cleanup", false, "Alias for --destroy")
 	check := flag.Bool("check", false, "Check Kubernetes connectivity")
 	debug := flag.Bool("debug", false, "Enable debug command logging")

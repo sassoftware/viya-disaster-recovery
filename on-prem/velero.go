@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +19,6 @@ const (
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
-	defaultVeleroSecretName     = "cloud-credentials"
 	backupDiscoveryTimeout      = 3 * time.Minute
 )
 
@@ -67,7 +65,19 @@ func setupVelero(cfg *Config, r Runner) error {
 	if err != nil {
 		return err
 	}
-	args := []string{
+	args := buildVeleroInstallArgs(cfg, credPath)
+	if err := r.Run("velero", args...); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			fmt.Println("Velero appears to be already installed; continuing")
+		} else {
+			return err
+		}
+	}
+	return r.Run("velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace)
+}
+
+func buildVeleroInstallArgs(cfg *Config, credPath string) []string {
+	return []string{
 		"install",
 		"--features=EnableCSI",
 		"--use-node-agent",
@@ -80,14 +90,6 @@ func setupVelero(cfg *Config, r Runner) error {
 		"--backup-location-config", fmt.Sprintf("region=minio,s3ForcePathStyle=true,s3Url=%s", cfg.LibrefsEndpoint),
 		"--namespace", cfg.VeleroNamespace,
 	}
-	if err := r.Run("velero", args...); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
-			fmt.Println("Velero appears to be already installed; continuing")
-		} else {
-			return err
-		}
-	}
-	return r.Run("velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace)
 }
 
 func writeVeleroCredentials(cfg *Config) (string, error) {
@@ -272,117 +274,45 @@ func ensureVeleroReadyForRestore(cfg *Config, r Runner) error {
 	if _, err := exec.LookPath("velero"); err != nil {
 		return fmt.Errorf("velero CLI not found in PATH: %w", err)
 	}
-	credPath, credContent, err := ensureExistingVeleroCredentialsFile(cfg)
+	if r.Debug {
+		fmt.Printf("[restore-debug] velero CLI found in PATH\n")
+		fmt.Printf("[restore-debug] restore kubeconfig: %s\n", cfg.KubeconfigPath)
+		fmt.Printf("[restore-debug] velero namespace: %s\n", cfg.VeleroNamespace)
+	}
+	credPath, err := ensureExistingVeleroCredentialsFile(cfg)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Credential file detected: %s\n", credPath)
 
+	installRequired := false
 	if err := ensureVeleroCoreInstalled(cfg, r); err != nil {
-		fmt.Println("Velero core components are not ready; attempting automatic setup...")
-		if err := setupVeleroForRestore(cfg, r); err != nil {
+		installRequired = true
+		if r.Debug {
+			fmt.Printf("[restore-debug] velero core verification failed: %v\n", err)
+		}
+	}
+	if err := ensureBackupStorageLocationAccessible(cfg, r); err != nil {
+		installRequired = true
+		if r.Debug {
+			fmt.Printf("[restore-debug] BackupStorageLocation check failed before install: %v\n", err)
+		}
+	}
+
+	if installRequired {
+		fmt.Println("Velero install/verification remediation required; reinstalling using existing credentials file...")
+		if err := setupVeleroForRestore(cfg, r, credPath); err != nil {
 			return fmt.Errorf("failed to install/configure Velero automatically: %w", err)
 		}
 		if err := ensureVeleroCoreInstalled(cfg, r); err != nil {
 			return fmt.Errorf("Velero setup completed but core components are still not ready: %w", err)
 		}
-	}
-
-	secretName, secretSource, err := resolveVeleroCredentialSecretName(cfg, r)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Velero credentials secret name in use: %s (source: %s)\n", secretName, secretSource)
-
-	action, err := syncVeleroCredentialSecretFromFile(cfg, r, secretName, credPath, credContent)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Velero credentials secret %s/%s: %s\n", cfg.VeleroNamespace, secretName, action)
-
-	if err := verifyBackupStorageLocationCredentialBinding(cfg, r, secretName); err != nil {
-		return err
-	}
-
-	if err := ensureBackupStorageLocationAccessible(cfg, r); err != nil {
-		return err
+		if err := ensureBackupStorageLocationAccessible(cfg, r); err != nil {
+			return fmt.Errorf("BackupStorageLocation validation failed after Velero install: %w", err)
+		}
 	}
 
 	fmt.Println("Velero preflight checks passed")
-	return nil
-}
-
-func resolveVeleroCredentialSecretName(cfg *Config, r Runner) (string, string, error) {
-	configured := strings.TrimSpace(cfg.VeleroCredentialSecretName)
-	if configured != "" {
-		return configured, "VELERO_CREDENTIAL_SECRET_NAME", nil
-	}
-
-	type bslList struct {
-		Items []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Spec struct {
-				Credential struct {
-					Name string `json:"name"`
-				} `json:"credential"`
-			} `json:"spec"`
-		} `json:"items"`
-	}
-
-	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
-	if err == nil {
-		var parsed bslList
-		if unmarshalErr := json.Unmarshal([]byte(out), &parsed); unmarshalErr == nil {
-			for _, item := range parsed.Items {
-				name := strings.TrimSpace(item.Spec.Credential.Name)
-				if name != "" {
-					return name, fmt.Sprintf("BackupStorageLocation %s", item.Metadata.Name), nil
-				}
-			}
-		}
-	}
-
-	return defaultVeleroSecretName, "default", nil
-}
-
-func verifyBackupStorageLocationCredentialBinding(cfg *Config, r Runner, expectedSecretName string) error {
-	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
-	if err != nil {
-		return fmt.Errorf("unable to verify BackupStorageLocation credential binding: %w", err)
-	}
-
-	type bslList struct {
-		Items []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Spec struct {
-				Credential struct {
-					Name string `json:"name"`
-				} `json:"credential"`
-			} `json:"spec"`
-		} `json:"items"`
-	}
-
-	var parsed bslList
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return fmt.Errorf("failed to parse BackupStorageLocation output while validating credentials: %w", err)
-	}
-	if len(parsed.Items) == 0 {
-		return fmt.Errorf("no BackupStorageLocation resources found while validating credentials")
-	}
-
-	for _, item := range parsed.Items {
-		boundSecret := strings.TrimSpace(item.Spec.Credential.Name)
-		if boundSecret == "" {
-			return fmt.Errorf("BackupStorageLocation %s has no credential secret binding; remediation: set spec.credential.name to %s and re-run restore", item.Metadata.Name, expectedSecretName)
-		}
-		if boundSecret != expectedSecretName {
-			return fmt.Errorf("BackupStorageLocation %s references secret %s, but restore configured %s; remediation: set VELERO_CREDENTIAL_SECRET_NAME=%s or update BackupStorageLocation credential binding", item.Metadata.Name, boundSecret, expectedSecretName, boundSecret)
-		}
-	}
 	return nil
 }
 
@@ -423,46 +353,36 @@ func waitForBackupsDiscovered(cfg *Config, r Runner, timeout, interval time.Dura
 	return nil, fmt.Errorf("failed waiting for Velero backups after %s: %w", timeout, lastErr)
 }
 
-func ensureExistingVeleroCredentialsFile(cfg *Config) (string, []byte, error) {
+func ensureExistingVeleroCredentialsFile(cfg *Config) (string, error) {
 	credPath := filepath.Join(cfg.CredentialsDir, cfg.CredentialsFile)
 	info, err := os.Stat(credPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil, fmt.Errorf("existing Velero credentials file is required for restore but was not found at %s", credPath)
+			return "", fmt.Errorf("existing Velero credentials file is required for restore but was not found at %s", credPath)
 		}
-		return "", nil, fmt.Errorf("unable to access existing Velero credentials file %s: %w", credPath, err)
+		return "", fmt.Errorf("unable to access existing Velero credentials file %s: %w", credPath, err)
 	}
 	if info.IsDir() {
-		return "", nil, fmt.Errorf("credentials path is a directory, expected file: %s", credPath)
+		return "", fmt.Errorf("credentials path is a directory, expected file: %s", credPath)
 	}
 	content, err := os.ReadFile(credPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to read existing Velero credentials file %s: %w", credPath, err)
+		return "", fmt.Errorf("unable to read existing Velero credentials file %s: %w", credPath, err)
 	}
 	if err := validateVeleroCredentialsContent(content); err != nil {
-		return "", nil, fmt.Errorf("invalid Velero credentials file %s: %w", credPath, err)
+		return "", fmt.Errorf("invalid Velero credentials file %s: %w", credPath, err)
 	}
-	return credPath, content, nil
+	return credPath, nil
 }
 
-func setupVeleroForRestore(cfg *Config, r Runner) error {
+func setupVeleroForRestore(cfg *Config, r Runner, credPath string) error {
 	if err := os.Setenv("KUBECONFIG", cfg.KubeconfigPath); err != nil {
 		return err
 	}
 
-	args := []string{
-		"install",
-		"--features=EnableCSI",
-		"--use-node-agent",
-		"--default-snapshot-move-data",
-		"--provider", cfg.VeleroProvider,
-		"--plugins", cfg.VeleroPlugin,
-		"--bucket", cfg.LibrefsBucket,
-		"--use-volume-snapshots=true",
-		"--backup-location-config", fmt.Sprintf("region=minio,s3ForcePathStyle=true,s3Url=%s", cfg.LibrefsEndpoint),
-		"--no-secret",
-		"--namespace", cfg.VeleroNamespace,
-	}
+	args := buildVeleroInstallArgs(cfg, credPath)
+	// Show the exact command shape used by restore preflight for easier troubleshooting.
+	fmt.Printf("Restore preflight Velero install command: velero %s\n", strings.Join(args, " "))
 	if err := r.Run("velero", args...); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			fmt.Println("Velero appears to be already installed; continuing")
@@ -482,77 +402,6 @@ func ensureVeleroCoreInstalled(cfg *Config, r Runner) error {
 		return err
 	}
 	return nil
-}
-
-func syncVeleroCredentialSecretFromFile(cfg *Config, r Runner, secretName, credPath string, credContent []byte) (string, error) {
-	secretExists, currentContent, err := getVeleroCredentialSecretContent(cfg, r, secretName)
-	if err != nil {
-		return "", err
-	}
-	if secretExists && bytes.Equal(currentContent, credContent) {
-		return "reused", nil
-	}
-
-	manifest, err := runCommandCapture(r,
-		"kubectl", "-n", cfg.VeleroNamespace,
-		"create", "secret", "generic", secretName,
-		"--from-file=cloud="+credPath,
-		"--dry-run=client",
-		"-o", "yaml",
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to build Velero credentials secret manifest from %s: %w", credPath, err)
-	}
-
-	tmp, err := os.CreateTemp("", "velero-credentials-secret-*.yaml")
-	if err != nil {
-		return "", fmt.Errorf("failed to prepare temporary manifest for Velero credentials secret: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(manifest); err != nil {
-		tmp.Close()
-		return "", fmt.Errorf("failed to write Velero credentials secret manifest: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("failed to finalize Velero credentials secret manifest: %w", err)
-	}
-
-	if _, err := runCommandCapture(r, "kubectl", "apply", "-f", tmp.Name()); err != nil {
-		return "", fmt.Errorf("failed to apply Velero credentials secret from %s: %w", credPath, err)
-	}
-
-	if secretExists {
-		return "updated", nil
-	}
-	return "created", nil
-}
-
-func getVeleroCredentialSecretContent(cfg *Config, r Runner, secretName string) (bool, []byte, error) {
-	out, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "secret", secretName, "-o", "json")
-	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "notfound") || strings.Contains(errLower, "not found") {
-			return false, nil, nil
-		}
-		return false, nil, fmt.Errorf("failed to check Velero credentials secret %s/%s: %w", cfg.VeleroNamespace, secretName, err)
-	}
-
-	type secretJSON struct {
-		Data map[string]string `json:"data"`
-	}
-	var parsed secretJSON
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return false, nil, fmt.Errorf("failed to parse Velero credentials secret output: %w", err)
-	}
-	encoded, ok := parsed.Data["cloud"]
-	if !ok {
-		return true, nil, nil
-	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return false, nil, fmt.Errorf("failed to decode Velero credentials secret cloud data: %w", err)
-	}
-	return true, decoded, nil
 }
 
 func validateVeleroCredentialsContent(content []byte) error {

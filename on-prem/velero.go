@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ const (
 	permissionBackupScriptPath  = "scripts/backup_permission.sh"
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
+	veleroPollInterval          = 20 * time.Second
 )
 
 type operationStatus struct {
@@ -22,6 +24,23 @@ type operationStatus struct {
 	Action    string
 	Status    string
 	ExitCode  int
+}
+
+type veleroDescribeSummary struct {
+	Phase       string
+	Warnings    string
+	Errors      string
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+type veleroOperationResult struct {
+	Operation string
+	Name      string
+	Phase     string
+	Warnings  string
+	Errors    string
+	Duration  time.Duration
 }
 
 func setupVelero(cfg *Config, r Runner) error {
@@ -113,16 +132,19 @@ func createBackup(cfg *Config, r Runner) error {
 	state.BackupName = name
 	_ = state.Mark("backup", "created")
 
-	describeRow := operationStatus{Component: "Velero Backup", Phase: "Backup Phase", Action: "Described", Status: "Success", ExitCode: 0}
-	if _, err := r.Output("velero", "backup", "describe", name, "--details", "--namespace", cfg.VeleroNamespace); err != nil {
-		describeRow.Status = "Failed"
-		describeRow.ExitCode = extractExitCode(err)
-		report = append(report, describeRow)
+	monitorRow := operationStatus{Component: "Velero Backup", Phase: "Backup Phase", Action: "Monitored", Status: "Success", ExitCode: 0}
+	backupResult, err := monitorVeleroOperation(cfg, r, "backup", name)
+	if err != nil {
+		monitorRow.Status = "Failed"
+		monitorRow.ExitCode = extractExitCode(err)
+		report = append(report, monitorRow)
+		printVeleroFinalSummary(backupResult)
 		printOperationReport(report)
 		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
-	report = append(report, describeRow)
+	report = append(report, monitorRow)
+	printVeleroFinalSummary(backupResult)
 
 	printOperationReport(report)
 	printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
@@ -172,16 +194,19 @@ func createRestore(cfg *Config, r Runner) error {
 	state.RestoreName = restore
 	_ = state.Mark("restore", "created")
 
-	describeRow := operationStatus{Component: "Velero Restore", Phase: "Restore Phase", Action: "Described", Status: "Success", ExitCode: 0}
-	if _, err := r.Output("velero", "restore", "describe", restore, "--details", "--namespace", cfg.VeleroNamespace); err != nil {
-		describeRow.Status = "Failed"
-		describeRow.ExitCode = extractExitCode(err)
-		report = append(report, describeRow)
+	monitorRow := operationStatus{Component: "Velero Restore", Phase: "Restore Phase", Action: "Monitored", Status: "Success", ExitCode: 0}
+	restoreResult, err := monitorVeleroOperation(cfg, r, "restore", restore)
+	if err != nil {
+		monitorRow.Status = "Failed"
+		monitorRow.ExitCode = extractExitCode(err)
+		report = append(report, monitorRow)
+		printVeleroFinalSummary(restoreResult)
 		printOperationReport(report)
 		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
-	report = append(report, describeRow)
+	report = append(report, monitorRow)
+	printVeleroFinalSummary(restoreResult)
 
 	restorePermRow, err := runPermissionRestoreScript(cfg, r)
 	report = append(report, restorePermRow)
@@ -195,6 +220,177 @@ func createRestore(cfg *Config, r Runner) error {
 	printOperationReport(report)
 	printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 	return nil
+}
+
+func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (veleroOperationResult, error) {
+	operationLabel := resourceType
+	if len(resourceType) > 0 {
+		operationLabel = strings.ToUpper(resourceType[:1]) + strings.ToLower(resourceType[1:])
+	}
+	result := veleroOperationResult{
+		Operation: operationLabel,
+		Name:      name,
+		Phase:     "Unknown",
+		Warnings:  "Unknown",
+		Errors:    "Unknown",
+	}
+
+	start := time.Now()
+	pollCount := 0
+	for {
+		pollCount++
+		out, err := runCommandCapture(r, "velero", resourceType, "describe", name, "--details", "--namespace", cfg.VeleroNamespace)
+		if err != nil {
+			result.Duration = time.Since(start)
+			return result, err
+		}
+
+		summary := parseVeleroDescribeSummary(out)
+		if summary.Phase != "" {
+			result.Phase = summary.Phase
+		}
+		if summary.Warnings != "" {
+			result.Warnings = summary.Warnings
+		}
+		if summary.Errors != "" {
+			result.Errors = summary.Errors
+		}
+
+		result.Duration = operationElapsed(start, summary.StartedAt, summary.CompletedAt)
+		printVeleroProgress(result, pollCount)
+
+		phaseLower := strings.ToLower(strings.TrimSpace(result.Phase))
+		switch phaseLower {
+		case "completed":
+			return result, nil
+		case "failed", "partiallyfailed":
+			return result, fmt.Errorf("velero %s %s ended in %s", resourceType, name, result.Phase)
+		}
+
+		time.Sleep(veleroPollInterval)
+	}
+}
+
+func runCommandCapture(r Runner, name string, args ...string) (string, error) {
+	if r.Debug {
+		fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	}
+	cmd := exec.Command(name, args...)
+	cmd.Env = os.Environ()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("command failed: %s %s\nstdout:\n%s\nstderr:\n%s\nerror: %w", name, strings.Join(args, " "), stdout.String(), stderr.String(), err)
+	}
+	return stdout.String(), nil
+}
+
+func parseVeleroDescribeSummary(out string) veleroDescribeSummary {
+	summary := veleroDescribeSummary{}
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !strings.Contains(trimmed, ":") {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		value := valueAfterColon(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "phase:"):
+			summary.Phase = value
+		case strings.HasPrefix(lower, "warnings:"):
+			summary.Warnings = value
+		case strings.HasPrefix(lower, "errors:"):
+			summary.Errors = value
+		case strings.HasPrefix(lower, "started:"), strings.HasPrefix(lower, "start timestamp:"):
+			if ts, ok := parseVeleroTimestamp(value); ok {
+				summary.StartedAt = &ts
+			}
+		case strings.HasPrefix(lower, "completed:"), strings.HasPrefix(lower, "completion timestamp:"):
+			if ts, ok := parseVeleroTimestamp(value); ok {
+				summary.CompletedAt = &ts
+			}
+		}
+	}
+
+	if summary.Phase == "" {
+		summary.Phase = "Unknown"
+	}
+	if summary.Warnings == "" {
+		summary.Warnings = "Unknown"
+	}
+	if summary.Errors == "" {
+		summary.Errors = "Unknown"
+	}
+	return summary
+}
+
+func valueAfterColon(line string) string {
+	idx := strings.Index(line, ":")
+	if idx == -1 {
+		return ""
+	}
+	return strings.TrimSpace(line[idx+1:])
+}
+
+func parseVeleroTimestamp(value string) (time.Time, bool) {
+	v := strings.TrimSpace(value)
+	if v == "" || strings.EqualFold(v, "n/a") || strings.EqualFold(v, "<none>") {
+		return time.Time{}, false
+	}
+
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05",
+	}
+	for _, format := range formats {
+		if ts, err := time.Parse(format, v); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func operationElapsed(fallbackStart time.Time, startedAt, completedAt *time.Time) time.Duration {
+	start := fallbackStart
+	if startedAt != nil {
+		start = *startedAt
+	}
+	end := time.Now()
+	if completedAt != nil {
+		end = *completedAt
+	}
+	if end.Before(start) {
+		return 0
+	}
+	return end.Sub(start)
+}
+
+func printVeleroProgress(result veleroOperationResult, pollCount int) {
+	if pollCount > 1 {
+		// Move to the start of the previous progress block and clear it for a live refresh.
+		fmt.Print("\033[7A\033[J")
+	}
+	fmt.Printf("=== Velero %s Progress ===\n", result.Operation)
+	fmt.Printf("Name: %s\n", result.Name)
+	fmt.Printf("Poll: %d (interval %s)\n", pollCount, veleroPollInterval)
+	fmt.Printf("Phase: %s\n", result.Phase)
+	fmt.Printf("Elapsed: %s\n", result.Duration.Round(time.Second))
+	fmt.Printf("Errors: %s\n", result.Errors)
+	fmt.Printf("Warnings: %s\n", result.Warnings)
+}
+
+func printVeleroFinalSummary(result veleroOperationResult) {
+	fmt.Printf("\nVelero %s Final Summary\n", result.Operation)
+	fmt.Printf("- Name: %s\n", result.Name)
+	fmt.Printf("- Status: %s\n", result.Phase)
+	fmt.Printf("- Duration: %s\n", result.Duration.Round(time.Second))
+	fmt.Printf("- Warnings: %s\n", result.Warnings)
+	fmt.Printf("- Errors: %s\n", result.Errors)
 }
 
 func runPermissionBackupScript(cfg *Config, r Runner) (operationStatus, error) {

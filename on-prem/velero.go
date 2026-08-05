@@ -282,41 +282,44 @@ func ensureVeleroReadyForRestore(cfg *Config, r Runner) error {
 	if _, err := exec.LookPath("velero"); err != nil {
 		return fmt.Errorf("velero CLI not found in PATH: %w", err)
 	}
-	if r.Debug {
-		fmt.Printf("[restore-debug] velero CLI found in PATH\n")
-		fmt.Printf("[restore-debug] restore kubeconfig: %s\n", cfg.KubeconfigPath)
-		fmt.Printf("[restore-debug] velero namespace: %s\n", cfg.VeleroNamespace)
-	}
+
 	credPath, err := ensureExistingVeleroCredentialsFile(cfg)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Credential file detected: %s\n", credPath)
 
-	installRequired := false
-	if err := ensureVeleroCoreInstalled(cfg, r); err != nil {
-		installRequired = true
-		if r.Debug {
-			fmt.Printf("[restore-debug] velero core verification failed: %v\n", err)
-		}
+	if err := setupVeleroForRestore(cfg, r, credPath); err != nil {
+		return fmt.Errorf("failed to configure Velero for restore: %w", err)
 	}
 
-	if installRequired {
-		fmt.Println("Velero install/verification remediation required; reinstalling using existing credentials file...")
-		if err := setupVeleroForRestore(cfg, r, credPath); err != nil {
-			return fmt.Errorf("failed to install/configure Velero automatically: %w", err)
-		}
-		if err := ensureVeleroCoreInstalled(cfg, r); err != nil {
-			return fmt.Errorf("Velero setup completed but core components are still not ready: %w", err)
-		}
+	fmt.Println("Waiting for Velero deployment readiness...")
+	if err := waitForVeleroDeploymentReady(cfg, r, 3*time.Minute, bslReadyPollInterval); err != nil {
+		return fmt.Errorf("Velero deployment not ready: %w", err)
 	}
 
+	fmt.Println("Waiting for BackupStorageLocation availability...")
 	if err := waitForBackupStorageLocationAvailable(cfg, r, bslReadyTimeout, bslReadyPollInterval); err != nil {
-		return fmt.Errorf("BackupStorageLocation validation failed: %w", err)
+		return fmt.Errorf("BackupStorageLocation not available: %w", err)
 	}
 
-	fmt.Println("Velero preflight checks passed")
 	return nil
+}
+
+func waitForVeleroDeploymentReady(cfg *Config, r Runner, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "deployment", "velero"); err == nil {
+			if _, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace,
+				"wait", "--for=condition=Available", "deployment/velero", "--timeout=30s"); err == nil {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for Velero deployment to become ready", timeout)
+		}
+		time.Sleep(interval)
+	}
 }
 
 func waitForBackupsDiscovered(cfg *Config, r Runner, timeout, interval time.Duration) ([]veleroBackupSummary, error) {
@@ -523,19 +526,13 @@ func listBackupStorageLocations(cfg *Config, r Runner) ([]backupStorageLocationS
 
 func waitForBackupStorageLocationAvailable(cfg *Config, r Runner, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	printedCreateWait := false
-	printedAvailabilityWait := false
 	var lastDetails string
 
 	for {
 		locations, err := listBackupStorageLocations(cfg, r)
 		if err == nil {
 			if len(locations) == 0 {
-				if !printedCreateWait {
-					fmt.Println("Waiting for BackupStorageLocation to be created...")
-					printedCreateWait = true
-				}
-				lastDetails = fmt.Sprintf("no Velero backup storage locations found in namespace %s", cfg.VeleroNamespace)
+				lastDetails = fmt.Sprintf("no BackupStorageLocation found in namespace %s", cfg.VeleroNamespace)
 			} else {
 				hasAvailable := false
 				problems := make([]string, 0, len(locations))
@@ -555,11 +552,6 @@ func waitForBackupStorageLocationAvailable(cfg *Config, r Runner, timeout, inter
 					fmt.Println("BackupStorageLocation Available.")
 					return nil
 				}
-
-				if !printedAvailabilityWait {
-					fmt.Println("Waiting for BackupStorageLocation to become Available...")
-					printedAvailabilityWait = true
-				}
 				lastDetails = strings.Join(problems, "; ")
 			}
 		} else {
@@ -570,7 +562,7 @@ func waitForBackupStorageLocationAvailable(cfg *Config, r Runner, timeout, inter
 			if lastDetails == "" {
 				lastDetails = "timed out waiting for BackupStorageLocation"
 			}
-			return fmt.Errorf("timed out after %s waiting for BackupStorageLocation readiness: %s", timeout, lastDetails)
+			return fmt.Errorf("timed out after %s waiting for BackupStorageLocation to become Available: %s", timeout, lastDetails)
 		}
 
 		time.Sleep(interval)
@@ -590,6 +582,7 @@ func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
 		return nil, fmt.Errorf("no Velero backups found in storage")
 	}
 
+	fmt.Printf("Found %d backup(s).\n", len(backups))
 	printAvailableBackups(backups)
 	return backups, nil
 }

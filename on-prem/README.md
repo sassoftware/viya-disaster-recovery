@@ -88,7 +88,7 @@ Restore credential prerequisites:
 Restore workflow sequence:
 
 1. Install or verify Velero on the restore cluster.
-2. Verify Velero `BackupStorageLocation` is healthy and accessible.
+2. Wait for `BackupStorageLocation` to be created and become `Available` (poll every 5 seconds, timeout 2 minutes).
 3. Wait at least 40 seconds after `BackupStorageLocation` is `Available`.
 4. Refresh and fetch available backups from Velero, retrying several times if backup discovery is still in progress.
 5. List available backups.

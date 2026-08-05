@@ -19,8 +19,7 @@ const (
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
-	restoreBackupWarmupTimeout  = 40 * time.Second
-	restoreBackupWarmupInterval = 5 * time.Second
+	restorePostInstallWait      = 40 * time.Second
 )
 
 type operationStatus struct {
@@ -193,9 +192,8 @@ func createRestore(cfg *Config, r Runner) error {
 	report = append(report, preflightRow)
 
 	warmupRow := operationStatus{Component: "Backup Discovery Warmup", Phase: "Restore Phase", Action: "Waited", Status: "Success", ExitCode: 0}
-	if _, err := waitForBackupsDiscovered(cfg, r, restoreBackupWarmupTimeout, restoreBackupWarmupInterval); err != nil {
-		fmt.Printf("Backup discovery warmup completed without discovered backups within %s. Refreshing backup list now...\n", restoreBackupWarmupTimeout)
-	}
+	fmt.Printf("BackupStorageLocation is available. Waiting %s before fetching backups...\n", restorePostInstallWait)
+	time.Sleep(restorePostInstallWait)
 	report = append(report, warmupRow)
 
 	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Fetched", Status: "Success", ExitCode: 0}

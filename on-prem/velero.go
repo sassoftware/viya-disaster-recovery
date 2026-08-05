@@ -20,6 +20,8 @@ const (
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
 	restorePostInstallWait      = 40 * time.Second
+	restoreBackupFetchAttempts  = 5
+	restoreBackupFetchInterval  = 8 * time.Second
 )
 
 type operationStatus struct {
@@ -191,13 +193,16 @@ func createRestore(cfg *Config, r Runner) error {
 	}
 	report = append(report, preflightRow)
 
+	fmt.Println("BackupStorageLocation: Available")
+
 	warmupRow := operationStatus{Component: "Backup Discovery Warmup", Phase: "Restore Phase", Action: "Waited", Status: "Success", ExitCode: 0}
-	fmt.Printf("BackupStorageLocation is available. Waiting %s before fetching backups...\n", restorePostInstallWait)
+	fmt.Printf("Waiting %s for backup synchronization...\n", restorePostInstallWait)
 	time.Sleep(restorePostInstallWait)
 	report = append(report, warmupRow)
 
 	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Fetched", Status: "Success", ExitCode: 0}
-	availableBackups, err := fetchVeleroBackups(cfg, r)
+	fmt.Println("Fetching available backups...")
+	availableBackups, err := fetchVeleroBackupsWithRetry(cfg, r, restoreBackupFetchAttempts, restoreBackupFetchInterval)
 	if err != nil {
 		discoveryRow.Status = "Failed"
 		discoveryRow.ExitCode = extractExitCode(err)
@@ -514,6 +519,31 @@ func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
 
 	printAvailableBackups(backups)
 	return backups, nil
+}
+
+func fetchVeleroBackupsWithRetry(cfg *Config, r Runner, attempts int, interval time.Duration) ([]veleroBackupSummary, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		backups, err := fetchVeleroBackups(cfg, r)
+		if err == nil {
+			return backups, nil
+		}
+		lastErr = err
+
+		if attempt == attempts {
+			break
+		}
+
+		fmt.Printf("No backups discovered yet (attempt %d/%d). Retrying in %s...\n", attempt, attempts, interval)
+		time.Sleep(interval)
+		fmt.Println("Fetching available backups...")
+	}
+
+	return nil, fmt.Errorf("unable to discover Velero backups after %d attempt(s): %w", attempts, lastErr)
 }
 
 func parseVeleroBackups(out string) ([]veleroBackupSummary, error) {

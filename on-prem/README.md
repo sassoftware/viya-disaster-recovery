@@ -90,7 +90,7 @@ Restore workflow sequence:
 1. Install or verify Velero on the restore cluster.
 2. Verify Velero `BackupStorageLocation` is healthy and accessible.
 3. Wait at least 40 seconds after `BackupStorageLocation` is `Available`.
-4. Refresh and fetch available backups from Velero.
+4. Refresh and fetch available backups from Velero, retrying several times if backup discovery is still in progress.
 5. List available backups.
 6. Prompt to select a backup and validate the selected backup is in `Completed` phase.
 7. Start Velero restore with the selected backup and monitor until terminal phase.

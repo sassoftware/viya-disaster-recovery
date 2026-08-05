@@ -20,7 +20,7 @@ const (
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
-	veleroCredentialSecretName  = "cloud-credentials"
+	defaultVeleroSecretName     = "cloud-credentials"
 	backupDiscoveryTimeout      = 3 * time.Minute
 )
 
@@ -288,17 +288,101 @@ func ensureVeleroReadyForRestore(cfg *Config, r Runner) error {
 		}
 	}
 
-	action, err := syncVeleroCredentialSecretFromFile(cfg, r, credPath, credContent)
+	secretName, secretSource, err := resolveVeleroCredentialSecretName(cfg, r)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Velero credentials secret %s/%s: %s\n", cfg.VeleroNamespace, veleroCredentialSecretName, action)
+	fmt.Printf("Velero credentials secret name in use: %s (source: %s)\n", secretName, secretSource)
+
+	action, err := syncVeleroCredentialSecretFromFile(cfg, r, secretName, credPath, credContent)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Velero credentials secret %s/%s: %s\n", cfg.VeleroNamespace, secretName, action)
+
+	if err := verifyBackupStorageLocationCredentialBinding(cfg, r, secretName); err != nil {
+		return err
+	}
 
 	if err := ensureBackupStorageLocationAccessible(cfg, r); err != nil {
 		return err
 	}
 
 	fmt.Println("Velero preflight checks passed")
+	return nil
+}
+
+func resolveVeleroCredentialSecretName(cfg *Config, r Runner) (string, string, error) {
+	configured := strings.TrimSpace(cfg.VeleroCredentialSecretName)
+	if configured != "" {
+		return configured, "VELERO_CREDENTIAL_SECRET_NAME", nil
+	}
+
+	type bslList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Credential struct {
+					Name string `json:"name"`
+				} `json:"credential"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+
+	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	if err == nil {
+		var parsed bslList
+		if unmarshalErr := json.Unmarshal([]byte(out), &parsed); unmarshalErr == nil {
+			for _, item := range parsed.Items {
+				name := strings.TrimSpace(item.Spec.Credential.Name)
+				if name != "" {
+					return name, fmt.Sprintf("BackupStorageLocation %s", item.Metadata.Name), nil
+				}
+			}
+		}
+	}
+
+	return defaultVeleroSecretName, "default", nil
+}
+
+func verifyBackupStorageLocationCredentialBinding(cfg *Config, r Runner, expectedSecretName string) error {
+	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	if err != nil {
+		return fmt.Errorf("unable to verify BackupStorageLocation credential binding: %w", err)
+	}
+
+	type bslList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Credential struct {
+					Name string `json:"name"`
+				} `json:"credential"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+
+	var parsed bslList
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return fmt.Errorf("failed to parse BackupStorageLocation output while validating credentials: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		return fmt.Errorf("no BackupStorageLocation resources found while validating credentials")
+	}
+
+	for _, item := range parsed.Items {
+		boundSecret := strings.TrimSpace(item.Spec.Credential.Name)
+		if boundSecret == "" {
+			return fmt.Errorf("BackupStorageLocation %s has no credential secret binding; remediation: set spec.credential.name to %s and re-run restore", item.Metadata.Name, expectedSecretName)
+		}
+		if boundSecret != expectedSecretName {
+			return fmt.Errorf("BackupStorageLocation %s references secret %s, but restore configured %s; remediation: set VELERO_CREDENTIAL_SECRET_NAME=%s or update BackupStorageLocation credential binding", item.Metadata.Name, boundSecret, expectedSecretName, boundSecret)
+		}
+	}
 	return nil
 }
 
@@ -400,8 +484,8 @@ func ensureVeleroCoreInstalled(cfg *Config, r Runner) error {
 	return nil
 }
 
-func syncVeleroCredentialSecretFromFile(cfg *Config, r Runner, credPath string, credContent []byte) (string, error) {
-	secretExists, currentContent, err := getVeleroCredentialSecretContent(cfg, r)
+func syncVeleroCredentialSecretFromFile(cfg *Config, r Runner, secretName, credPath string, credContent []byte) (string, error) {
+	secretExists, currentContent, err := getVeleroCredentialSecretContent(cfg, r, secretName)
 	if err != nil {
 		return "", err
 	}
@@ -411,7 +495,7 @@ func syncVeleroCredentialSecretFromFile(cfg *Config, r Runner, credPath string, 
 
 	manifest, err := runCommandCapture(r,
 		"kubectl", "-n", cfg.VeleroNamespace,
-		"create", "secret", "generic", veleroCredentialSecretName,
+		"create", "secret", "generic", secretName,
 		"--from-file=cloud="+credPath,
 		"--dry-run=client",
 		"-o", "yaml",
@@ -443,14 +527,14 @@ func syncVeleroCredentialSecretFromFile(cfg *Config, r Runner, credPath string, 
 	return "created", nil
 }
 
-func getVeleroCredentialSecretContent(cfg *Config, r Runner) (bool, []byte, error) {
-	out, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "secret", veleroCredentialSecretName, "-o", "json")
+func getVeleroCredentialSecretContent(cfg *Config, r Runner, secretName string) (bool, []byte, error) {
+	out, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", "secret", secretName, "-o", "json")
 	if err != nil {
 		errLower := strings.ToLower(err.Error())
 		if strings.Contains(errLower, "notfound") || strings.Contains(errLower, "not found") {
 			return false, nil, nil
 		}
-		return false, nil, fmt.Errorf("failed to check Velero credentials secret %s/%s: %w", cfg.VeleroNamespace, veleroCredentialSecretName, err)
+		return false, nil, fmt.Errorf("failed to check Velero credentials secret %s/%s: %w", cfg.VeleroNamespace, secretName, err)
 	}
 
 	type secretJSON struct {
@@ -554,7 +638,11 @@ func ensureBackupStorageLocationAccessible(cfg *Config, r Runner) error {
 	}
 
 	if !hasAvailable {
-		return fmt.Errorf("no accessible Velero backup storage location found: %s", strings.Join(problems, "; "))
+		details := strings.Join(problems, "; ")
+		if strings.Contains(strings.ToLower(details), "metadata") || strings.Contains(strings.ToLower(details), "imds") || strings.Contains(strings.ToLower(details), "ec2") {
+			return fmt.Errorf("no accessible Velero backup storage location found: %s. remediation: verify restore credential file and secret binding (BackupStorageLocation spec.credential.name) to avoid IMDS fallback", details)
+		}
+		return fmt.Errorf("no accessible Velero backup storage location found: %s", details)
 	}
 	return nil
 }

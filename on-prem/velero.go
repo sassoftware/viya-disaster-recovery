@@ -491,34 +491,34 @@ type backupStorageLocationStatus struct {
 }
 
 func listBackupStorageLocations(cfg *Config, r Runner) ([]backupStorageLocationStatus, error) {
-	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	// Use plain velero CLI output; -o json reads raw CRD and may lag behind velero's reconciled state.
+	out, err := runCommandCapture(r, "velero", "backup-location", "get", "--namespace", cfg.VeleroNamespace)
 	if err != nil {
-		return nil, fmt.Errorf("unable to query Velero backup storage locations: %w", err)
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "no backup") || strings.Contains(errLower, "not found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unable to query backup storage locations: %w", err)
 	}
 
-	type bslList struct {
-		Items []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Status struct {
-				Phase   string `json:"phase"`
-				Message string `json:"message"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-
-	var parsed bslList
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse backup storage location output: %w", err)
-	}
-
-	locations := make([]backupStorageLocationStatus, 0, len(parsed.Items))
-	for _, item := range parsed.Items {
+	// Tabular output: NAME  PROVIDER  BUCKET/PREFIX  PHASE  LAST VALIDATED  ACCESS MODE  DEFAULT
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	locations := make([]backupStorageLocationStatus, 0, len(lines))
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "no ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
 		locations = append(locations, backupStorageLocationStatus{
-			Name:    strings.TrimSpace(item.Metadata.Name),
-			Phase:   strings.TrimSpace(item.Status.Phase),
-			Message: strings.TrimSpace(item.Status.Message),
+			Name:  fields[0],
+			Phase: fields[3],
 		})
 	}
 	return locations, nil

@@ -89,12 +89,13 @@ Restore workflow sequence:
 
 1. Install or verify Velero on the restore cluster.
 2. Verify Velero `BackupStorageLocation` is healthy and accessible.
-3. Wait for backups to be discovered in Velero.
-4. List available backups.
-5. Select backup interactively and validate `Completed` phase.
-6. Start Velero restore and monitor until terminal phase.
-7. Run `scripts/restore_permission.sh` only after successful restore completion.
-8. Print progress, status summary, and final summary.
+3. Wait up to 40 seconds for backups to be discovered (continues earlier if backups appear).
+4. Refresh and fetch available backups from Velero.
+5. List available backups.
+6. Prompt to select a backup and validate the selected backup is in `Completed` phase.
+7. Start Velero restore with the selected backup and monitor until terminal phase.
+8. Run `scripts/restore_permission.sh` only after successful restore completion.
+9. Print progress, status summary, and final summary.
 
 If permission restore fails, diagnostics and exit code are reported clearly.
 
@@ -119,9 +120,13 @@ Component | Phase | Action | Status | Exit Code
 
 Final summary fields:
 
-- Permission Backup
-- Restore Permissions
-- Overall DR Operation
+- Backup flow:
+	- Permission Backup
+	- Restore Permissions
+	- Overall DR Operation
+- Restore flow:
+	- Restore Permissions
+	- Overall DR Operation
 
 ## Destroy Cleanup Operations
 

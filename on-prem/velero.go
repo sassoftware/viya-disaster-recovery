@@ -19,7 +19,8 @@ const (
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
 	veleroPollInterval          = 20 * time.Second
-	backupDiscoveryTimeout      = 3 * time.Minute
+	restoreBackupWarmupTimeout  = 40 * time.Second
+	restoreBackupWarmupInterval = 5 * time.Second
 )
 
 type operationStatus struct {
@@ -120,7 +121,7 @@ func createBackup(cfg *Config, r Runner) error {
 	permissionBackupStatus = permRow.Status
 	if err != nil {
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printBackupFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 
@@ -141,7 +142,7 @@ func createBackup(cfg *Config, r Runner) error {
 		veleroBackupRow.ExitCode = extractExitCode(err)
 		report = append(report, veleroBackupRow)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printBackupFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, veleroBackupRow)
@@ -158,20 +159,19 @@ func createBackup(cfg *Config, r Runner) error {
 		report = append(report, monitorRow)
 		printVeleroFinalSummary(backupResult)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printBackupFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, monitorRow)
 	printVeleroFinalSummary(backupResult)
 
 	printOperationReport(report)
-	printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+	printBackupFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
 	return nil
 }
 
 func createRestore(cfg *Config, r Runner) error {
 	report := make([]operationStatus, 0, 7)
-	permissionBackupStatus := "Skipped"
 	restorePermissionStatus := "Skipped"
 
 	if cfg.ClusterType != "restore" {
@@ -187,23 +187,28 @@ func createRestore(cfg *Config, r Runner) error {
 		preflightRow.ExitCode = extractExitCode(err)
 		report = append(report, preflightRow)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, preflightRow)
 
-	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Discovered", Status: "Success", ExitCode: 0}
-	availableBackups, err := waitForBackupsDiscovered(cfg, r, backupDiscoveryTimeout, veleroPollInterval)
+	warmupRow := operationStatus{Component: "Backup Discovery Warmup", Phase: "Restore Phase", Action: "Waited", Status: "Success", ExitCode: 0}
+	if _, err := waitForBackupsDiscovered(cfg, r, restoreBackupWarmupTimeout, restoreBackupWarmupInterval); err != nil {
+		fmt.Printf("Backup discovery warmup completed without discovered backups within %s. Refreshing backup list now...\n", restoreBackupWarmupTimeout)
+	}
+	report = append(report, warmupRow)
+
+	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Fetched", Status: "Success", ExitCode: 0}
+	availableBackups, err := fetchVeleroBackups(cfg, r)
 	if err != nil {
 		discoveryRow.Status = "Failed"
 		discoveryRow.ExitCode = extractExitCode(err)
 		report = append(report, discoveryRow)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, discoveryRow)
-	printAvailableBackups(availableBackups)
 
 	selectionRow := operationStatus{Component: "Backup Selection", Phase: "Restore Phase", Action: "Selected", Status: "Success", ExitCode: 0}
 	backup, err := selectBackupForRestore(cfg, availableBackups)
@@ -212,7 +217,7 @@ func createRestore(cfg *Config, r Runner) error {
 		selectionRow.ExitCode = extractExitCode(err)
 		report = append(report, selectionRow)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, selectionRow)
@@ -232,7 +237,7 @@ func createRestore(cfg *Config, r Runner) error {
 		veleroRestoreRow.ExitCode = extractExitCode(err)
 		report = append(report, veleroRestoreRow)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, veleroRestoreRow)
@@ -250,7 +255,7 @@ func createRestore(cfg *Config, r Runner) error {
 		report = append(report, monitorRow)
 		printVeleroFinalSummary(restoreResult)
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return err
 	}
 	report = append(report, monitorRow)
@@ -261,12 +266,12 @@ func createRestore(cfg *Config, r Runner) error {
 	restorePermissionStatus = restorePermRow.Status
 	if err != nil {
 		printOperationReport(report)
-		printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+		printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 		return fmt.Errorf("restore completed but permission restore failed: %w", err)
 	}
 
 	printOperationReport(report)
-	printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallOperationStatus(report))
+	printRestoreFinalSummary(restorePermissionStatus, overallOperationStatus(report))
 	return nil
 }
 
@@ -942,9 +947,15 @@ func printOperationReport(report []operationStatus) {
 	}
 }
 
-func printDRFinalSummary(permissionBackupStatus, restorePermissionStatus, overallStatus string) {
+func printBackupFinalSummary(permissionBackupStatus, restorePermissionStatus, overallStatus string) {
 	fmt.Println("\nFinal Summary:")
 	fmt.Printf("- Permission Backup: %s\n", permissionBackupStatus)
+	fmt.Printf("- Restore Permissions: %s\n", restorePermissionStatus)
+	fmt.Printf("- Overall DR Operation: %s\n", overallStatus)
+}
+
+func printRestoreFinalSummary(restorePermissionStatus, overallStatus string) {
+	fmt.Println("\nFinal Summary:")
 	fmt.Printf("- Restore Permissions: %s\n", restorePermissionStatus)
 	fmt.Printf("- Overall DR Operation: %s\n", overallStatus)
 }

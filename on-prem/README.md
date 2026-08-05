@@ -76,8 +76,10 @@ Before restore, update `environment.properties`:
 Restore credential prerequisites:
 
 - Restore requires an existing credentials file at `CREDENTIALS_DIR/CREDENTIALS_FILE`.
-- Restore requires an existing Velero credentials secret `cloud-credentials` in `VELERO_NAMESPACE`.
-- Restore does not create, replace, or rotate the credentials file or Velero credentials secret.
+- Restore treats the credentials file as the source of truth.
+- If the Velero credentials secret `cloud-credentials` is missing, restore creates it from the credentials file.
+- If the secret exists but differs, restore updates it from the credentials file.
+- Restore never generates a new credentials file and reuses the existing backup/source-cluster credentials file.
 
 ```bash
 ./viya-dr-automation-hpos --restore

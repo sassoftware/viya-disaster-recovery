@@ -33,14 +33,6 @@ type operationStatus struct {
 	ExitCode  int
 }
 
-type veleroDescribeSummary struct {
-	Phase       string
-	Warnings    string
-	Errors      string
-	StartedAt   *time.Time
-	CompletedAt *time.Time
-}
-
 type veleroOperationResult struct {
 	Operation string
 	Name      string
@@ -722,24 +714,24 @@ func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (v
 	pollCount := 0
 	for {
 		pollCount++
-		out, err := runCommandCapture(r, "velero", resourceType, "describe", name, "--details", "--namespace", cfg.VeleroNamespace)
+		out, err := runCommandCapture(r, "velero", resourceType, "get", "--namespace", cfg.VeleroNamespace)
 		if err != nil {
 			result.Duration = time.Since(start)
 			return result, err
 		}
 
-		summary := parseVeleroDescribeSummary(out)
-		if summary.Phase != "" {
-			result.Phase = summary.Phase
+		phase, errors, warnings := parseVeleroGetStatus(out, name)
+		if phase != "" {
+			result.Phase = phase
 		}
-		if summary.Warnings != "" {
-			result.Warnings = summary.Warnings
+		if errors != "" {
+			result.Errors = errors
 		}
-		if summary.Errors != "" {
-			result.Errors = summary.Errors
+		if warnings != "" {
+			result.Warnings = warnings
 		}
 
-		result.Duration = operationElapsed(start, summary.StartedAt, summary.CompletedAt)
+		result.Duration = time.Since(start)
 		printVeleroProgress(result, pollCount)
 
 		phaseLower := strings.ToLower(strings.TrimSpace(result.Phase))
@@ -770,87 +762,52 @@ func runCommandCapture(r Runner, name string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-func parseVeleroDescribeSummary(out string) veleroDescribeSummary {
-	summary := veleroDescribeSummary{}
-	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || !strings.Contains(trimmed, ":") {
+// parseVeleroGetStatus extracts phase, errors, warnings from `velero backup|restore get` tabular output.
+func parseVeleroGetStatus(out, name string) (phase, errors, warnings string) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return
+	}
+	header := lines[0]
+	upper := strings.ToUpper(header)
+
+	statusIdx := strings.Index(upper, "STATUS")
+	errorsIdx := strings.Index(upper, "ERRORS")
+	warningsIdx := strings.Index(upper, "WARNINGS")
+
+	if statusIdx < 0 {
+		return
+	}
+
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		lower := strings.ToLower(trimmed)
-		value := valueAfterColon(trimmed)
-		switch {
-		case strings.HasPrefix(lower, "phase:"):
-			summary.Phase = value
-		case strings.HasPrefix(lower, "warnings:"):
-			summary.Warnings = value
-		case strings.HasPrefix(lower, "errors:"):
-			summary.Errors = value
-		case strings.HasPrefix(lower, "started:"), strings.HasPrefix(lower, "start timestamp:"):
-			if ts, ok := parseVeleroTimestamp(value); ok {
-				summary.StartedAt = &ts
-			}
-		case strings.HasPrefix(lower, "completed:"), strings.HasPrefix(lower, "completion timestamp:"):
-			if ts, ok := parseVeleroTimestamp(value); ok {
-				summary.CompletedAt = &ts
-			}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != name {
+			continue
 		}
+		phase = colValue(line, statusIdx, errorsIdx)
+		if errorsIdx >= 0 {
+			errors = colValue(line, errorsIdx, warningsIdx)
+		}
+		if warningsIdx >= 0 {
+			warnings = colValue(line, warningsIdx, -1)
+		}
+		return
 	}
-
-	if summary.Phase == "" {
-		summary.Phase = "Unknown"
-	}
-	if summary.Warnings == "" {
-		summary.Warnings = "Unknown"
-	}
-	if summary.Errors == "" {
-		summary.Errors = "Unknown"
-	}
-	return summary
+	return
 }
 
-func valueAfterColon(line string) string {
-	idx := strings.Index(line, ":")
-	if idx == -1 {
+func colValue(line string, start, end int) string {
+	if start < 0 || start >= len(line) {
 		return ""
 	}
-	return strings.TrimSpace(line[idx+1:])
-}
-
-func parseVeleroTimestamp(value string) (time.Time, bool) {
-	v := strings.TrimSpace(value)
-	if v == "" || strings.EqualFold(v, "n/a") || strings.EqualFold(v, "<none>") {
-		return time.Time{}, false
+	s := line[start:]
+	if end > start && end < len(line) {
+		s = line[start:end]
 	}
-
-	formats := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05 -0700 MST",
-		"2006-01-02 15:04:05 -0700",
-		"2006-01-02 15:04:05",
-	}
-	for _, format := range formats {
-		if ts, err := time.Parse(format, v); err == nil {
-			return ts, true
-		}
-	}
-	return time.Time{}, false
-}
-
-func operationElapsed(fallbackStart time.Time, startedAt, completedAt *time.Time) time.Duration {
-	start := fallbackStart
-	if startedAt != nil {
-		start = *startedAt
-	}
-	end := time.Now()
-	if completedAt != nil {
-		end = *completedAt
-	}
-	if end.Before(start) {
-		return 0
-	}
-	return end.Sub(start)
+	return strings.TrimSpace(s)
 }
 
 func printVeleroProgress(result veleroOperationResult, pollCount int) {

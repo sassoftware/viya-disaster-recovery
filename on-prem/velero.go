@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +20,7 @@ const (
 	veleroPollInterval          = 20 * time.Second
 	bslReadyTimeout             = 2 * time.Minute
 	bslReadyPollInterval        = 5 * time.Second
-	restorePostInstallWait      = 40 * time.Second
+	restorePostInstallWait      = 50 * time.Second
 	restoreBackupFetchAttempts  = 5
 	restoreBackupFetchInterval  = 8 * time.Second
 )
@@ -322,43 +321,6 @@ func waitForVeleroDeploymentReady(cfg *Config, r Runner, timeout, interval time.
 	}
 }
 
-func waitForBackupsDiscovered(cfg *Config, r Runner, timeout, interval time.Duration) ([]veleroBackupSummary, error) {
-	fmt.Printf("Waiting for backups to be discovered (timeout %s)...\n", timeout)
-	deadline := time.Now().Add(timeout)
-	attempt := 0
-	var lastErr error
-
-	for {
-		attempt++
-		out, err := runCommandCapture(r, "velero", "backup", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
-		if err == nil {
-			backups, parseErr := parseVeleroBackups(out)
-			if parseErr != nil {
-				lastErr = parseErr
-			} else if len(backups) > 0 {
-				fmt.Printf("Discovered %d backup(s) in Velero storage.\n", len(backups))
-				return backups, nil
-			} else {
-				lastErr = fmt.Errorf("no backups discovered yet")
-			}
-		} else {
-			lastErr = err
-		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-		fmt.Printf("No backups available yet (attempt %d). Retrying in %s (remaining %s).\n", attempt, interval, remaining.Round(time.Second))
-		time.Sleep(interval)
-	}
-
-	if lastErr == nil {
-		lastErr = fmt.Errorf("backup discovery timed out")
-	}
-	return nil, fmt.Errorf("failed waiting for Velero backups after %s: %w", timeout, lastErr)
-}
-
 func ensureExistingVeleroCredentialsFile(cfg *Config) (string, error) {
 	credPath := filepath.Join(cfg.CredentialsDir, cfg.CredentialsFile)
 	info, err := os.Stat(credPath)
@@ -570,14 +532,16 @@ func waitForBackupStorageLocationAvailable(cfg *Config, r Runner, timeout, inter
 }
 
 func fetchVeleroBackups(cfg *Config, r Runner) ([]veleroBackupSummary, error) {
-	out, err := runCommandCapture(r, "velero", "backup", "get", "--namespace", cfg.VeleroNamespace, "-o", "json")
+	// Plain text: avoids CRD status lag that -o json can expose
+	out, err := runCommandCapture(r, "velero", "backup", "get", "--namespace", cfg.VeleroNamespace)
 	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "no backup") || strings.Contains(errLower, "not found") {
+			return nil, fmt.Errorf("no Velero backups found in storage")
+		}
 		return nil, fmt.Errorf("unable to fetch Velero backups: %w", err)
 	}
-	backups, err := parseVeleroBackups(out)
-	if err != nil {
-		return nil, err
-	}
+	backups := parseVeleroBackupsText(out)
 	if len(backups) == 0 {
 		return nil, fmt.Errorf("no Velero backups found in storage")
 	}
@@ -612,49 +576,36 @@ func fetchVeleroBackupsWithRetry(cfg *Config, r Runner, attempts int, interval t
 	return nil, fmt.Errorf("unable to discover Velero backups after %d attempt(s): %w", attempts, lastErr)
 }
 
-func parseVeleroBackups(out string) ([]veleroBackupSummary, error) {
-
-	type backupList struct {
-		Items []struct {
-			Metadata struct {
-				Name              string `json:"name"`
-				CreationTimestamp string `json:"creationTimestamp"`
-			} `json:"metadata"`
-			Spec struct {
-				StorageLocation string `json:"storageLocation"`
-			} `json:"spec"`
-			Status struct {
-				Phase               string      `json:"phase"`
-				Warnings            interface{} `json:"warnings"`
-				Errors              interface{} `json:"errors"`
-				StartTimestamp      string      `json:"startTimestamp"`
-				CompletionTimestamp string      `json:"completionTimestamp"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-
-	var parsed backupList
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse Velero backup list: %w", err)
-	}
-
-	backups := make([]veleroBackupSummary, 0, len(parsed.Items))
-	for _, item := range parsed.Items {
-		created := strings.TrimSpace(item.Metadata.CreationTimestamp)
-		if created == "" {
-			created = strings.TrimSpace(item.Status.StartTimestamp)
+// parseVeleroBackupsText parses tabular output of `velero backup get`.
+// Columns: NAME STATUS ERRORS WARNINGS CREATED(date time tz) EXPIRES STORAGE_LOCATION SELECTOR
+func parseVeleroBackupsText(out string) []veleroBackupSummary {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	backups := make([]veleroBackupSummary, 0, len(lines))
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "no ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		created := fields[4]
+		if len(fields) >= 6 {
+			created = fields[4] + " " + fields[5]
 		}
 		backups = append(backups, veleroBackupSummary{
-			Name:        item.Metadata.Name,
-			Phase:       strings.TrimSpace(item.Status.Phase),
-			Created:     created,
-			Completed:   strings.TrimSpace(item.Status.CompletionTimestamp),
-			Warnings:    strings.TrimSpace(fmt.Sprint(item.Status.Warnings)),
-			Errors:      strings.TrimSpace(fmt.Sprint(item.Status.Errors)),
-			StorageName: strings.TrimSpace(item.Spec.StorageLocation),
+			Name:     fields[0],
+			Phase:    fields[1],
+			Errors:   fields[2],
+			Warnings: fields[3],
+			Created:  created,
 		})
 	}
-	return backups, nil
+	return backups
 }
 
 func printAvailableBackups(backups []veleroBackupSummary) {

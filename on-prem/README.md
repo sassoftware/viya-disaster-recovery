@@ -1,4 +1,4 @@
-# Onprem HPOS Automation for SAS Viya 4 Disaster Recovery
+# Onprem HPOS/Openstack Automation for SAS Viya 4 Disaster Recovery
 
 This folder follows the Azure automation style, but targets HPOS/OpenStack using libreFS as an S3-compatible object store and Velero's AWS plugin.
 

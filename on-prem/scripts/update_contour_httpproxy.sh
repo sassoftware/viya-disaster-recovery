@@ -159,7 +159,21 @@ build_fqdn() {
 	[ -n "$CLUSTER_NAME" ] || fail "Unable to build FQDN: cluster/context is empty."
 
 	NEW_FQDN="${NAMESPACE}.contour.${CLUSTER_NAME}"
-	log_success "New FQDN computed: $NEW_FQDN"
+	log_info "Computed new FQDN: $NEW_FQDN"
+
+	if [ -t 0 ]; then
+		printf 'Is this FQDN correct? [yes/N]: '
+		read -r FQDN_CONFIRM
+		if [ "${FQDN_CONFIRM}" != "yes" ]; then
+			printf 'Enter the correct new FQDN: '
+			read -r CUSTOM_FQDN
+			CUSTOM_FQDN=$(printf '%s' "${CUSTOM_FQDN:-}" | tr -d '[:space:]')
+			[ -n "$CUSTOM_FQDN" ] || fail "FQDN must not be empty."
+			NEW_FQDN="$CUSTOM_FQDN"
+		fi
+	fi
+
+	log_success "New FQDN: $NEW_FQDN"
 }
 
 # ── Step 6: Fetch current HTTPProxy state ───────────────────────────────────

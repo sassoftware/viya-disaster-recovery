@@ -122,6 +122,22 @@ Wait for the environment to become healthy before proceeding.
 
 After SAS Viya is available, update the Contour HTTPProxy to use the restored cluster DNS.
 
+Option 1: Automated update (recommended)
+
+Use the built-in script to update `sas-httpproxy-root` non-interactively (export/update/apply) and validate the final HTTPProxy status.
+
+```bash
+# Run with interactive namespace prompt (default: viya)
+./scripts/update_contour_httpproxy.sh
+
+# Or pass namespace directly
+./scripts/update_contour_httpproxy.sh viya
+```
+
+The script reads `environment.properties`, validates `CLUSTER_TYPE=restore`, exports `KUBECONFIG` from `KUBECONFIG_PATH`, computes the new FQDN (`<namespace>.contour.<cluster>`), applies the update, and verifies HTTPProxy `Valid` status.
+
+Option 2: Manual update
+
 Verify the current HTTPProxy configuration:
 
 ```bash

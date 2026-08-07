@@ -89,7 +89,7 @@ Restore workflow sequence:
 
 1. Install or verify Velero on the restore cluster.
 2. Wait for `BackupStorageLocation` to be created and become `Available` (poll every 5 seconds, timeout 2 minutes).
-3. Wait at least 40 seconds after `BackupStorageLocation` is `Available`.
+3. Wait at least 50 seconds after `BackupStorageLocation` is `Available`.
 4. Refresh and fetch available backups from Velero, retrying several times if backup discovery is still in progress.
 5. List available backups.
 6. Prompt to select a backup and validate the selected backup is in `Completed` phase.
@@ -99,34 +99,71 @@ Restore workflow sequence:
 
 If permission restore fails, diagnostics and exit code are reported clearly.
 
-## Permission Script Files
+### Post-Restore Validation and Contour HTTPProxy Update
 
-The following scripts are integrated into the DR workflow:
+Once the restore has completed successfully, export the restored cluster configuration and verify that SAS Viya is running correctly.
 
-- `scripts/backup_permission.sh` (canonical entrypoint)
-- `scripts/restore_permission.sh` (canonical entrypoint)
-
-Execution prerequisites validated by the automation:
-
-- Script file exists
-- Script file is executable
-- Required parameters are present
-
-Status summary format:
-
-```text
-Component | Phase | Action | Status | Exit Code
+```bash
+export KUBECONFIG=/path/to/restored-cluster/admin-kubeconfig
+kubectl config current-context
 ```
 
-Final summary fields:
+Validate that all Viya workloads are healthy and accessible. If SAS Viya is not fully operational, restart the environment using the following commands:
 
-- Backup flow:
-	- Permission Backup
-	- Restore Permissions
-	- Overall DR Operation
-- Restore flow:
-	- Restore Permissions
-	- Overall DR Operation
+```bash
+# Stop all Viya services
+kubectl -n viya create job --from cronjobs/sas-stop-all stopdep-23062026
+
+# Start all Viya services
+kubectl -n viya create job --from cronjobs/sas-start-all startdep-23062026
+```
+
+Wait for the environment to become healthy before proceeding.
+
+After SAS Viya is available, update the Contour HTTPProxy to use the restored cluster DNS.
+
+Verify the current HTTPProxy configuration:
+
+```bash
+kubectl get httpproxy -n viya | grep sas-httpproxy-root
+```
+
+Example output:
+
+```text
+sas-httpproxy-root viya.contour.xxxx-source-m1.xxxx-iac-1.hpos5.xxx.xxx.com xxx-ingress-certificate-dmh6d8h7mh valid Valid HTTPProxy
+```
+
+Edit the HTTPProxy:
+
+```bash
+kubectl edit httpproxy sas-httpproxy-root -n viya
+```
+
+Update the `virtualhost.fqdn` value to the restored cluster DNS.
+
+Example:
+
+```yaml
+virtualhost:
+  fqdn: viya.contour.viya-restore-m1.xxxx-iac-1.hpos5.xxx.xxx.xxx
+  tls:
+    secretName: sas-ingress-certificate-dmh6d8h7mh
+```
+
+Save the changes and verify the HTTPProxy status:
+
+```bash
+kubectl get httpproxy -n viya | grep sas-httpproxy-root
+```
+
+Expected output:
+
+```text
+sas-httpproxy-root viya.contour.viya-restore-m1.xxxx-iac-1.hpos5.xxx.xxx.xxx xxx-ingress-certificate-dmh6d8h7mh valid Valid HTTPProxy
+```
+
+This step is required after a successful restore to ensure external access is routed through the restored cluster DNS and that the Contour HTTPProxy configuration is valid.
 
 ## Destroy Cleanup Operations
 

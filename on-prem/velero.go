@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,7 +18,11 @@ const (
 	permissionBackupScriptPath  = "scripts/backup_permission.sh"
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
+	veleroBackupNamePrefix     = "viya-full-backup"
+	veleroRestoreNamePrefix    = "viya-full-restore"
+	veleroNameTimestampFormat  = "20060102-150405"
 	veleroPollInterval          = 20 * time.Second
+	veleroMonitorTimeout        = 60 * time.Minute
 	bslReadyTimeout             = 2 * time.Minute
 	bslReadyPollInterval        = 5 * time.Second
 	restorePostInstallWait      = 50 * time.Second
@@ -34,12 +39,28 @@ type operationStatus struct {
 }
 
 type veleroOperationResult struct {
-	Operation string
-	Name      string
-	Phase     string
-	Warnings  string
-	Errors    string
-	Duration  time.Duration
+	Operation      string
+	Name           string
+	Phase          string
+	TotalItems     int
+	CompletedItems int
+	Warnings       int
+	Errors         int
+	Duration       time.Duration
+}
+
+// veleroResourceStatus mirrors the subset of Backup/Restore status fields needed for progress reporting.
+type veleroResourceStatus struct {
+	Status struct {
+		Phase    string `json:"phase"`
+		Errors   int    `json:"errors"`
+		Warnings int    `json:"warnings"`
+		Progress *struct {
+			TotalItems    int `json:"totalItems"`
+			ItemsBackedUp int `json:"itemsBackedUp"`
+			ItemsRestored int `json:"itemsRestored"`
+		} `json:"progress"`
+	} `json:"status"`
 }
 
 type veleroBackupSummary struct {
@@ -119,10 +140,7 @@ func createBackup(cfg *Config, r Runner) error {
 		return err
 	}
 
-	name := cfg.BackupName
-	if name == "auto" || strings.TrimSpace(name) == "" {
-		name = "viya-full-backup-" + time.Now().Format("20060102-150405")
-	}
+	name := veleroBackupName(cfg.BackupName)
 	args := []string{"backup", "create", name,
 		"--include-namespaces", cfg.ViyaNamespace,
 		"--include-cluster-resources=true",
@@ -216,10 +234,7 @@ func createRestore(cfg *Config, r Runner) error {
 	}
 	report = append(report, selectionRow)
 
-	restore := cfg.RestoreName
-	if strings.TrimSpace(restore) == "" || restore == "auto" {
-		restore = "viya-restore-" + time.Now().Format("20060102-150405")
-	}
+	restore := veleroRestoreName(cfg.RestoreName)
 	args := []string{"restore", "create", restore,
 		"--from-backup", backup.Name,
 		"--include-cluster-resources=true",
@@ -697,6 +712,23 @@ func emptyAsNA(value string) string {
 	return trimmed
 }
 
+func veleroBackupName(configured string) string {
+	return veleroResourceName(configured, veleroBackupNamePrefix, time.Now())
+}
+
+func veleroRestoreName(configured string) string {
+	return veleroResourceName(configured, veleroRestoreNamePrefix, time.Now())
+}
+
+func veleroResourceName(configured, prefix string, now time.Time) string {
+	trimmed := strings.TrimSpace(configured)
+	if trimmed != "" && !strings.EqualFold(trimmed, "auto") {
+		return trimmed
+	}
+	now = now.UTC()
+	return fmt.Sprintf("%s-%s-%09d", prefix, now.Format(veleroNameTimestampFormat), now.Nanosecond())
+}
+
 func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (veleroOperationResult, error) {
 	operationLabel := resourceType
 	if len(resourceType) > 0 {
@@ -706,29 +738,31 @@ func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (v
 		Operation: operationLabel,
 		Name:      name,
 		Phase:     "Unknown",
-		Warnings:  "Unknown",
-		Errors:    "Unknown",
 	}
 
 	start := time.Now()
+	deadline := start.Add(veleroMonitorTimeout)
 	pollCount := 0
 	for {
 		pollCount++
-		out, err := runCommandCapture(r, "velero", resourceType, "get", "--namespace", cfg.VeleroNamespace)
+		status, err := fetchVeleroResourceStatus(cfg, r, resourceType, name)
 		if err != nil {
 			result.Duration = time.Since(start)
 			return result, err
 		}
 
-		phase, errors, warnings := parseVeleroGetStatus(out, name)
-		if phase != "" {
-			result.Phase = phase
+		if status.Status.Phase != "" {
+			result.Phase = status.Status.Phase
 		}
-		if errors != "" {
-			result.Errors = errors
-		}
-		if warnings != "" {
-			result.Warnings = warnings
+		result.Errors = status.Status.Errors
+		result.Warnings = status.Status.Warnings
+		if progress := status.Status.Progress; progress != nil {
+			result.TotalItems = progress.TotalItems
+			if strings.EqualFold(resourceType, "restore") {
+				result.CompletedItems = progress.ItemsRestored
+			} else {
+				result.CompletedItems = progress.ItemsBackedUp
+			}
 		}
 
 		result.Duration = time.Since(start)
@@ -737,13 +771,34 @@ func monitorVeleroOperation(cfg *Config, r Runner, resourceType, name string) (v
 		phaseLower := strings.ToLower(strings.TrimSpace(result.Phase))
 		switch phaseLower {
 		case "completed":
+			// Warnings are informational; only Phase determines success.
 			return result, nil
-		case "failed", "partiallyfailed":
+		case "failed", "partiallyfailed", "failedvalidation":
 			return result, fmt.Errorf("velero %s %s ended in %s", resourceType, name, result.Phase)
+		}
+
+		if time.Now().After(deadline) {
+			return result, fmt.Errorf("timed out after %s waiting for velero %s %s to reach a terminal phase (last phase: %s)", veleroMonitorTimeout, resourceType, name, result.Phase)
 		}
 
 		time.Sleep(veleroPollInterval)
 	}
+}
+
+// fetchVeleroResourceStatus reads the Backup/Restore custom resource as JSON so phase, item
+// progress, errors, and warnings are parsed as structured fields instead of fixed-width table text.
+func fetchVeleroResourceStatus(cfg *Config, r Runner, resourceType, name string) (veleroResourceStatus, error) {
+	crdPlural := fmt.Sprintf("%ss.velero.io", strings.ToLower(resourceType))
+	out, err := runCommandCapture(r, "kubectl", "-n", cfg.VeleroNamespace, "get", crdPlural, name, "-o", "json")
+	if err != nil {
+		return veleroResourceStatus{}, fmt.Errorf("unable to fetch %s %s status: %w", resourceType, name, err)
+	}
+
+	var status veleroResourceStatus
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		return veleroResourceStatus{}, fmt.Errorf("unable to parse %s %s status JSON: %w", resourceType, name, err)
+	}
+	return status, nil
 }
 
 func runCommandCapture(r Runner, name string, args ...string) (string, error) {
@@ -762,66 +817,35 @@ func runCommandCapture(r Runner, name string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// parseVeleroGetStatus extracts phase, errors, warnings from `velero backup|restore get` tabular output.
-func parseVeleroGetStatus(out, name string) (phase, errors, warnings string) {
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) < 2 {
-		return
+// progressItemsLabel names the item-count line based on operation direction.
+func progressItemsLabel(operation string) string {
+	if strings.EqualFold(operation, "restore") {
+		return "Restored Items"
 	}
-	header := lines[0]
-	upper := strings.ToUpper(header)
-
-	statusIdx := strings.Index(upper, "STATUS")
-	errorsIdx := strings.Index(upper, "ERRORS")
-	warningsIdx := strings.Index(upper, "WARNINGS")
-
-	if statusIdx < 0 {
-		return
-	}
-
-	for _, line := range lines[1:] {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != name {
-			continue
-		}
-		phase = colValue(line, statusIdx, errorsIdx)
-		if errorsIdx >= 0 {
-			errors = colValue(line, errorsIdx, warningsIdx)
-		}
-		if warningsIdx >= 0 {
-			warnings = colValue(line, warningsIdx, -1)
-		}
-		return
-	}
-	return
+	return "Backed Up Items"
 }
 
-func colValue(line string, start, end int) string {
-	if start < 0 || start >= len(line) {
-		return ""
+func formatProgressPercentage(total, completed int) string {
+	if total <= 0 {
+		return "N/A"
 	}
-	s := line[start:]
-	if end > start && end < len(line) {
-		s = line[start:end]
-	}
-	return strings.TrimSpace(s)
+	return fmt.Sprintf("%.0f%%", float64(completed)/float64(total)*100)
 }
 
 func printVeleroProgress(result veleroOperationResult, pollCount int) {
 	if pollCount > 1 {
 		// Move to the start of the previous progress block and clear it for a live refresh.
-		fmt.Print("\033[7A\033[J")
+		fmt.Print("\033[9A\033[J")
 	}
 	fmt.Printf("=== Velero %s Progress ===\n", result.Operation)
 	fmt.Printf("Name: %s\n", result.Name)
 	fmt.Printf("Poll: %d (interval %s)\n", pollCount, veleroPollInterval)
 	fmt.Printf("Phase: %s\n", result.Phase)
 	fmt.Printf("Elapsed: %s\n", result.Duration.Round(time.Second))
-	fmt.Printf("Errors: %s\n", result.Errors)
-	fmt.Printf("Warnings: %s\n", result.Warnings)
+	fmt.Printf("Total Items: %d\n", result.TotalItems)
+	fmt.Printf("%s: %d (%s)\n", progressItemsLabel(result.Operation), result.CompletedItems, formatProgressPercentage(result.TotalItems, result.CompletedItems))
+	fmt.Printf("Errors: %d\n", result.Errors)
+	fmt.Printf("Warnings: %d\n", result.Warnings)
 }
 
 func printVeleroFinalSummary(result veleroOperationResult) {
@@ -829,8 +853,10 @@ func printVeleroFinalSummary(result veleroOperationResult) {
 	fmt.Printf("- Name: %s\n", result.Name)
 	fmt.Printf("- Status: %s\n", result.Phase)
 	fmt.Printf("- Duration: %s\n", result.Duration.Round(time.Second))
-	fmt.Printf("- Warnings: %s\n", result.Warnings)
-	fmt.Printf("- Errors: %s\n", result.Errors)
+	fmt.Printf("- Total Items: %d\n", result.TotalItems)
+	fmt.Printf("- %s: %d (%s)\n", progressItemsLabel(result.Operation), result.CompletedItems, formatProgressPercentage(result.TotalItems, result.CompletedItems))
+	fmt.Printf("- Warnings: %d\n", result.Warnings)
+	fmt.Printf("- Errors: %d\n", result.Errors)
 }
 
 func runPermissionBackupScript(cfg *Config, r Runner) (operationStatus, error) {

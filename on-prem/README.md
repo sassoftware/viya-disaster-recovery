@@ -220,8 +220,8 @@ VELERO_PROVIDER=aws
 VELERO_PLUGIN=velero/velero-plugin-for-aws:v1.12.1
 VELERO_BUCKET=velero
 
-BACKUP_NAME=viya-full-backup
-RESTORE_NAME=viya-restore
+BACKUP_NAME=auto
+RESTORE_NAME=auto
 CREDENTIALS_DIR=credentials
 CREDENTIALS_FILE=velero-creds-local
 ```
@@ -232,3 +232,5 @@ CREDENTIALS_FILE=velero-creds-local
 - `LIBREFS_INSTALL_MODE=local` installs libreFS on the current machine using sudo.
 - `LIBREFS_INSTALL_MODE=remote` copies the libreFS binary to `LIBREFS_REMOTE_HOST` and configures systemd over SSH.
 - Velero is installed with `--features=EnableCSI`, `--use-node-agent`, and `--default-snapshot-move-data`.
+- `BACKUP_NAME=auto` and `RESTORE_NAME=auto` generate unique timestamped Velero names using `viya-full-backup-yyyyMMdd-HHmmss-nnnnnnnnn` and `viya-full-restore-yyyyMMdd-HHmmss-nnnnnnnnn`.
+- `VIYA_DEPLOYMENT_TYPE=nmt` (single-tenant) and `VIYA_DEPLOYMENT_TYPE=mt` (multi-tenant) both run the identical validated on-prem DR workflow; the value only affects startup validation and logging, not the backup/restore behavior.

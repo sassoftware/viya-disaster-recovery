@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+// Supported VIYA_DEPLOYMENT_TYPE values. Both use the identical validated on-prem
+// Velero backup/restore DR workflow; the value only drives validation and logging.
+const (
+	deploymentTypeNMT = "nmt"
+	deploymentTypeMT  = "mt"
+)
+
 type Config struct {
 	KubeconfigPath        string
 	ClusterType           string
@@ -47,9 +54,10 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		KubeconfigPath:        get(values, "KUBECONFIG_PATH", ""),
-		ClusterType:           get(values, "CLUSTER_TYPE", "source"),
-		ViyaDeploymentType:    get(values, "VIYA_DEPLOYMENT_TYPE", "nmt"),
+		KubeconfigPath: get(values, "KUBECONFIG_PATH", ""),
+		ClusterType:    get(values, "CLUSTER_TYPE", "source"),
+		// Normalized to lowercase so nmt/NMT/mt/MT are all accepted consistently.
+		ViyaDeploymentType:    strings.ToLower(get(values, "VIYA_DEPLOYMENT_TYPE", deploymentTypeNMT)),
 		ViyaNamespace:         get(values, "VIYA_NAMESPACE", "viya"),
 		NFSStorageClass:       get(values, "NFS_STORAGE_CLASS", "sas"),
 		NFSSnapshotClass:      get(values, "NFS_SNAPSHOT_CLASS", "nfs-snapshot-class"),
@@ -74,8 +82,8 @@ func LoadConfig(path string) (*Config, error) {
 		LibrefsRemoteHost:     get(values, "LIBREFS_REMOTE_HOST", ""),
 		LibrefsRemoteUser:     get(values, "LIBREFS_REMOTE_USER", "rocky"),
 		LibrefsRemoteKeyPath:  get(values, "LIBREFS_REMOTE_KEY_PATH", ""),
-		BackupName:            get(values, "BACKUP_NAME", "viya-full-backup"),
-		RestoreName:           get(values, "RESTORE_NAME", "viya-restore"),
+		BackupName:            get(values, "BACKUP_NAME", "auto"),
+		RestoreName:           get(values, "RESTORE_NAME", "auto"),
 		CredentialsDir:        get(values, "CREDENTIALS_DIR", "credentials"),
 		CredentialsFile:       get(values, "CREDENTIALS_FILE", "velero-creds-local"),
 	}
@@ -86,13 +94,21 @@ func (c *Config) ValidateForSetup() error {
 	if c.KubeconfigPath == "" {
 		return fmt.Errorf("KUBECONFIG_PATH is required")
 	}
-	if c.ViyaDeploymentType != "nmt" {
-		return fmt.Errorf("only VIYA_DEPLOYMENT_TYPE=nmt is supported for Velero backup/restore")
+	// nmt (single-tenant) and mt (multi-tenant) both run the same validated on-prem
+	// Velero backup/restore workflow; no branching logic depends on this value.
+	if c.ViyaDeploymentType != deploymentTypeNMT && c.ViyaDeploymentType != deploymentTypeMT {
+		return fmt.Errorf("VIYA_DEPLOYMENT_TYPE must be %q or %q, got %q", deploymentTypeNMT, deploymentTypeMT, c.ViyaDeploymentType)
 	}
 	if c.ClusterType != "source" && c.ClusterType != "restore" {
 		return fmt.Errorf("CLUSTER_TYPE must be source or restore")
 	}
 	return nil
+}
+
+// IsMultiTenant reports whether the configured Viya deployment is multi-tenant (mt).
+// Used only for informational logging; the DR workflow itself is identical for nmt and mt.
+func (c *Config) IsMultiTenant() bool {
+	return c.ViyaDeploymentType == deploymentTypeMT
 }
 
 func readProperties(path string) (map[string]string, error) {

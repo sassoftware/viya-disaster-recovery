@@ -22,6 +22,9 @@ func main() {
 	fatalIf(err)
 	r := Runner{Debug: *debug}
 	fatalIf(cfg.ValidateForSetup())
+	// Both nmt and mt run the identical validated on-prem Velero DR workflow;
+	// this line only confirms which deployment type was detected from environment.properties.
+	fmt.Printf("Detected VIYA_DEPLOYMENT_TYPE=%s (multi-tenant=%t); using the validated on-prem Velero DR workflow.\n", cfg.ViyaDeploymentType, cfg.IsMultiTenant())
 
 	if *check {
 		fatalIf(checkKubernetesConnectivity(cfg, r))

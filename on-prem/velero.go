@@ -18,9 +18,9 @@ const (
 	permissionBackupScriptPath  = "scripts/backup_permission.sh"
 	permissionRestoreScriptPath = "scripts/restore_permission.sh"
 	permissionBackupPVC         = "viya-permission-backup"
-	veleroBackupNamePrefix     = "viya-full-backup"
-	veleroRestoreNamePrefix    = "viya-full-restore"
-	veleroNameTimestampFormat  = "20060102-150405"
+	veleroBackupNamePrefix      = "viya-full-backup"
+	veleroRestoreNamePrefix     = "viya-full-restore"
+	veleroNameTimestampFormat   = "20060102-150405"
 	veleroPollInterval          = 20 * time.Second
 	veleroMonitorTimeout        = 60 * time.Minute
 	bslReadyTimeout             = 2 * time.Minute
@@ -28,6 +28,10 @@ const (
 	restorePostInstallWait      = 50 * time.Second
 	restoreBackupFetchAttempts  = 5
 	restoreBackupFetchInterval  = 8 * time.Second
+
+	// mtExtraBackupSyncWait is added on top of restorePostInstallWait for mt
+	// deployments, per the POC-validated Multi-Tenant restore guardrail.
+	mtExtraBackupSyncWait = 40 * time.Second
 )
 
 type operationStatus struct {
@@ -131,6 +135,7 @@ func createBackup(cfg *Config, r Runner) error {
 	if err := os.Setenv("KUBECONFIG", cfg.KubeconfigPath); err != nil {
 		return err
 	}
+	fmt.Printf("==> Running %s backup workflow for namespace %q\n", cfg.DeploymentTypeLabel(), cfg.ViyaNamespace)
 	permRow, err := runPermissionBackupScript(cfg, r)
 	report = append(report, permRow)
 	permissionBackupStatus = permRow.Status
@@ -192,6 +197,7 @@ func createRestore(cfg *Config, r Runner) error {
 	if err := os.Setenv("KUBECONFIG", cfg.KubeconfigPath); err != nil {
 		return err
 	}
+	fmt.Printf("==> Running %s restore workflow for namespace %q\n", cfg.DeploymentTypeLabel(), cfg.ViyaNamespace)
 
 	preflightRow := operationStatus{Component: "Velero Preflight", Phase: "Restore Phase", Action: "Validated", Status: "Success", ExitCode: 0}
 	if err := ensureVeleroReadyForRestore(cfg, r); err != nil {
@@ -205,8 +211,13 @@ func createRestore(cfg *Config, r Runner) error {
 	report = append(report, preflightRow)
 
 	warmupRow := operationStatus{Component: "Backup Discovery Warmup", Phase: "Restore Phase", Action: "Waited", Status: "Success", ExitCode: 0}
-	fmt.Printf("Waiting %d seconds for backup synchronization...\n", int(restorePostInstallWait.Seconds()))
-	time.Sleep(restorePostInstallWait)
+	wait := restorePostInstallWait
+	if cfg.IsMultiTenant() {
+		// MT POC guardrail: tenant onboarding adds extra Velero metadata to sync from object storage.
+		wait += mtExtraBackupSyncWait
+	}
+	fmt.Printf("Waiting %d seconds for backup synchronization...\n", int(wait.Seconds()))
+	time.Sleep(wait)
 	report = append(report, warmupRow)
 
 	discoveryRow := operationStatus{Component: "Backup Discovery", Phase: "Restore Phase", Action: "Fetched", Status: "Success", ExitCode: 0}

@@ -2,6 +2,21 @@
 
 This folder follows the Azure automation style, but targets HPOS/OpenStack using libreFS as an S3-compatible object store and Velero's AWS plugin.
 
+Supports both Non-Multi-Tenant (NMT) and Multi-Tenant (MT) SAS Viya 4 deployments via `VIYA_DEPLOYMENT_TYPE`. MT support was validated through a DR POC against a limited SAS Viya 4 Multi-Tenant deployment provisioned with [UDANext Multi-Tenancy](https://github.com/sas-institute-rnd-internal/viya-udanext-mt); both deployment types run the identical Velero backup/restore workflow.
+
+## Prerequisites
+
+| Component | Version |
+| --- | --- |
+| Rocky Linux | 9.x |
+| libreFS | Latest supported release |
+| Velero CLI | v1.18.0 |
+| Velero AWS Plugin | v1.12.1 |
+| Kubernetes CSI External Snapshotter | v8.4.0 |
+| NFS CSI Driver | `nfs.csi.k8s.io` |
+| kubectl | Version compatible with the cluster |
+| SAS Viya 4 Deployment Type | Non-Multi-Tenant (NMT) or Multi-Tenant (MT) |
+
 ## Build
 
 ```bash
@@ -197,6 +212,19 @@ Destroy cleanup behavior:
 - Deletes the configured `VELERO_NAMESPACE`.
 - Waits until namespace deletion completes.
 - Returns success when namespace deletion succeeds.
+
+## Multi-Tenant (MT) Support
+
+`VIYA_DEPLOYMENT_TYPE` accepts `nmt` (Non-Multi-Tenant) or `mt` (Multi-Tenant), case-insensitively. Both values run the identical validated Velero backup/restore workflow in this folder; the value is used only for startup validation and for the deployment type logged at the start of every run (`Detected VIYA_DEPLOYMENT_TYPE=...`). An invalid or missing value fails fast with a clear error before any DR operation starts.
+
+For a Multi-Tenant deployment, set:
+
+```properties
+VIYA_NAMESPACE=mt
+VIYA_DEPLOYMENT_TYPE=mt
+```
+
+`VIYA_NAMESPACE` typically matches the tenant/provider namespace created by the UDANext Multi-Tenancy enablement (commonly `mt`); update it to match your deployment. No other configuration changes are required for MT versus NMT.
 
 ## Sample restore environment.properties
 

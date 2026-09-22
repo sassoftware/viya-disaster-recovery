@@ -111,6 +111,14 @@ func (c *Config) IsMultiTenant() bool {
 	return c.ViyaDeploymentType == deploymentTypeMT
 }
 
+// DeploymentTypeLabel returns a human-readable label for logging.
+func (c *Config) DeploymentTypeLabel() string {
+	if c.IsMultiTenant() {
+		return "MT (Multi-Tenant)"
+	}
+	return "NMT (Non-Multi-Tenant)"
+}
+
 func readProperties(path string) (map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {

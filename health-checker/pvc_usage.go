@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -395,9 +396,62 @@ func generatePVCUsageRecommendations(h PVCUsageHealth) []string {
 	return recs
 }
 
-// displayPVCUsageResults renders the PVC capacity/usage table to the console.
+// pvcOrNA returns "N/A" for an empty/blank value so the table never shows a
+// bare empty cell for a field that wasn't collected.
+func pvcOrNA(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "N/A"
+	}
+	return s
+}
+
+// pvcUsePercentLabel reports "N/A" rather than "0%" when usage wasn't
+// collected - UsedSize=="" is the existing signal for that (see
+// checkPVCUsage), since UsedPercent's zero value is indistinguishable from a
+// real 0% reading.
+func pvcUsePercentLabel(p PVCDetail) string {
+	if p.UsedSize == "" {
+		return "N/A"
+	}
+	return fmt.Sprintf("%.0f%%", p.UsedPercent)
+}
+
+// pvcIsRWXOrNFS reports whether a PVC is shared (ReadWriteMany) or backed by
+// an NFS-style storage class, where `df` reports the whole filesystem/export
+// rather than this PVC's own directory usage.
+func pvcIsRWXOrNFS(p PVCDetail) bool {
+	for _, mode := range p.AccessModes {
+		if strings.EqualFold(mode, "ReadWriteMany") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(p.StorageClass), "nfs")
+}
+
+// pvcMountDetailLines returns the extra detail lines (mount location and/or
+// failure reason) shown under a PVC's row - omitted entirely for HEALTHY
+// rows, which need no further explanation.
+func pvcMountDetailLines(p PVCDetail) []string {
+	if p.Status == "HEALTHY" {
+		return nil
+	}
+	var lines []string
+	if p.UsagePod != "" {
+		lines = append(lines, fmt.Sprintf("Mount: pod=%s container=%s path=%s", p.UsagePod, p.UsageContainer, p.MountPath))
+	}
+	if p.Message != "" {
+		lines = append(lines, "Reason: "+p.Message)
+	}
+	return lines
+}
+
+// displayPVCUsageResults renders the PVC capacity/usage results as a
+// width-aware table, sorted by name. Column widths are derived from the
+// data, so the table stays aligned regardless of PVC name length; the sort
+// and N/A substitution are cosmetic only - health.PVCs (and its JSON
+// encoding) is read, never mutated.
 func displayPVCUsageResults(health PVCUsageHealth) {
-	fmt.Printf("%s%s┌─ PVC CAPACITY & USAGE CHECK %s%s\n", ColorBold, ColorWhite, strings.Repeat("─", 49), ColorReset)
+	fmt.Printf("%s%s┌─ PVC CAPACITY & USAGE %s%s\n", ColorBold, ColorWhite, strings.Repeat("─", 55), ColorReset)
 
 	color := getStatusColor(health.Status)
 	symbol := getStatusSymbol(health.Status)
@@ -406,19 +460,87 @@ func displayPVCUsageResults(health PVCUsageHealth) {
 	fmt.Printf("│ %s Message:%s %s\n", ColorBold, ColorReset, health.Message)
 	fmt.Printf("│\n")
 
-	for _, p := range health.PVCs {
-		pColor := getStatusColor(p.Status)
-		pSymbol := getStatusSymbol(p.Status)
-		usage := "n/a"
-		if p.UsedSize != "" {
-			usage = fmt.Sprintf("%s / %s (%.1f%%)", p.UsedSize, p.ProvisionedSize, p.UsedPercent)
+	if len(health.PVCs) == 0 {
+		fmt.Printf("│ (no PVCs found)\n")
+		fmt.Printf("%s└%s%s\n\n", ColorWhite, strings.Repeat("─", 79), ColorReset)
+		return
+	}
+
+	pvcs := make([]PVCDetail, len(health.PVCs))
+	copy(pvcs, health.PVCs)
+	sort.Slice(pvcs, func(i, j int) bool { return pvcs[i].Name < pvcs[j].Name })
+
+	headers := []string{"STATUS", "PVC", "PHASE", "REQUESTED", "CAPACITY", "USED", "USE%", "STORAGE CLASS", "ACCESS MODES"}
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+
+	rows := make([][]string, len(pvcs))
+	rwxOrNFSCount := 0
+	for i, p := range pvcs {
+		rows[i] = []string{
+			p.Status,
+			p.Name,
+			pvcOrNA(p.Phase),
+			pvcOrNA(p.RequestedSize),
+			pvcOrNA(p.ProvisionedSize),
+			pvcOrNA(p.UsedSize),
+			pvcUsePercentLabel(p),
+			pvcOrNA(p.StorageClass),
+			pvcOrNA(strings.Join(p.AccessModes, ",")),
 		}
-		fmt.Printf("│   %s%s%s %-30s req=%-8s prov=%-8s class=%-15s usage=%s\n",
-			pColor, pSymbol, ColorReset, p.Name, p.RequestedSize, p.ProvisionedSize, p.StorageClass, usage)
-		if p.Message != "" && p.Status != "HEALTHY" {
-			fmt.Printf("│       • %s\n", p.Message)
+		for c, cell := range rows[i] {
+			if len(cell) > widths[c] {
+				widths[c] = len(cell)
+			}
+		}
+		if pvcIsRWXOrNFS(p) {
+			rwxOrNFSCount++
 		}
 	}
+
+	writeRow := func(cells []string, color string) {
+		var line strings.Builder
+		line.WriteString("│   ")
+		for i, cell := range cells {
+			padded := fmt.Sprintf("%-*s", widths[i], cell)
+			if i == 0 && color != "" {
+				line.WriteString(color)
+				line.WriteString(padded)
+				line.WriteString(ColorReset)
+			} else {
+				line.WriteString(padded)
+			}
+			if i != len(cells)-1 {
+				line.WriteString("  ")
+			}
+		}
+		fmt.Println(line.String())
+	}
+
+	writeRow(headers, "")
+	indent := "│   " + strings.Repeat(" ", widths[0]) + "  "
+	for i, p := range pvcs {
+		writeRow(rows[i], getStatusColor(p.Status))
+		for _, detail := range pvcMountDetailLines(p) {
+			fmt.Println(indent + detail)
+		}
+	}
+
+	if rwxOrNFSCount > 0 {
+		fmt.Printf("│\n")
+		fmt.Printf("│ %s Note:%s %d PVC(s) use ReadWriteMany/NFS storage - df reports filesystem/export usage and may not reflect per-directory PVC usage\n",
+			ColorBold, ColorReset, rwxOrNFSCount)
+	}
+
+	fmt.Printf("│\n")
+	fmt.Printf("│ %s Summary:%s\n", ColorBold, ColorReset)
+	fmt.Printf("│   Total PVCs      : %d\n", health.Total)
+	fmt.Printf("│   Healthy         : %d\n", health.Healthy)
+	fmt.Printf("│   Degraded        : %d\n", health.Degraded)
+	fmt.Printf("│   Unhealthy       : %d\n", health.Unhealthy)
+	fmt.Printf("│   Unknown         : %d\n", health.Unknown)
 
 	fmt.Printf("%s└%s%s\n\n", ColorWhite, strings.Repeat("─", 79), ColorReset)
 }

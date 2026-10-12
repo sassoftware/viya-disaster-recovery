@@ -81,6 +81,7 @@ func main() {
 	pvcWarn := flag.Float64("pvc-usage-warn", 85, "Percent threshold for DEGRADED PVC usage")
 	pvcCritical := flag.Float64("pvc-usage-critical", 95, "Percent threshold for UNHEALTHY PVC usage")
 	strictRouting := flag.Bool("strict-routing", false, "Treat HTTP routing (Ingress/HTTPProxy) 401/403 responses as DEGRADED instead of informational")
+	maxFailedRoutes := flag.Int("max-failed-routes", 10, "Number of broken routes/HTTPProxies tolerated before HTTP Routing Endpoints is marked UNHEALTHY")
 	insecureSkipTLSVerify := flag.Bool("insecure-skip-tls-verify", false, "Skip TLS certificate verification for SAS Viya API calls (insecure)")
 	caCert := flag.String("ca-cert", "", "Path to a CA bundle (PEM) used to verify the SAS Viya API's TLS certificate")
 	viyaURLFlag := flag.String("viya-url", "", "SAS Viya base URL for API validation (overrides VIYA_URL env var)")
@@ -212,6 +213,7 @@ func main() {
 	viyaCfg := LoadViyaAPIConfig(*viyaURLFlag, *viyaUserFlag, *viyaAPITimeout)
 	viyaCfg.InsecureSkipTLSVerify = *insecureSkipTLSVerify
 	viyaCfg.CACertPath = *caCert
+	viyaCfg.MaxFailedRoutes = *maxFailedRoutes
 
 	fmt.Printf("%s %sChecking SAS Viya application APIs...%s\n", SymbolInfo, ColorBlue, ColorReset)
 	report.ViyaAPICheck = checkViyaAPIHealth(viyaCfg, namespace, kubeconfig, *strictRouting)

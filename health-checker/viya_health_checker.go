@@ -27,9 +27,13 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	kubectlTimeout    = 90 * time.Second
-	viyaHTTPTimeout   = 60 * time.Second
-	computeMaxRetries = 5
+	kubectlTimeout  = 90 * time.Second
+	viyaHTTPTimeout = 60 * time.Second
+
+	// defaultMaxFailedRoutes is the number of broken routes/HTTPProxies the
+	// HTTP Routing Endpoints check tolerates before going UNHEALTHY; override
+	// via ViyaAPIConfig.MaxFailedRoutes (--max-failed-routes).
+	defaultMaxFailedRoutes = 10
 
 	// Pagination fallback used by paginateCollectionCount when an endpoint's
 	// response has no "count" field.
@@ -95,26 +99,31 @@ type DeploymentMetadataHealth struct {
 	SecretsFound       int    `json:"secrets_found"`
 }
 
-// ComputeContextRef identifies the compute context used by a session check,
-// so the JSON report records which context was exercised.
-type ComputeContextRef struct {
-	Name string `json:"name,omitempty"`
-	ID   string `json:"id,omitempty"`
-}
-
 // RoutingSummary breaks down the routing mechanisms (Ingress and/or Contour
 // HTTPProxy) and HTTPProxy resource health backing the "HTTP Routing
 // Endpoints" check.
 type RoutingSummary struct {
-	RoutingType       string `json:"routing_type"`
-	IngressPaths      int    `json:"ingress_paths"`
-	HTTPProxyRoutes   int    `json:"httpproxy_routes"`
-	HTTPProxyValid    int    `json:"httpproxy_valid"`
-	HTTPProxyInvalid  int    `json:"httpproxy_invalid"`
-	HTTPProxyOrphaned int    `json:"httpproxy_orphaned"`
-	TargetsProbed     int    `json:"targets_probed"`
-	AuthIssues        int    `json:"auth_issues"`
-	Failures          int    `json:"failures"`
+	RoutingType          string          `json:"routing_type"`
+	IngressPaths         int             `json:"ingress_paths"`
+	HTTPProxyRoutes      int             `json:"httpproxy_routes"`
+	HTTPProxyValid       int             `json:"httpproxy_valid"`
+	HTTPProxyInvalid     int             `json:"httpproxy_invalid"`
+	HTTPProxyOrphaned    int             `json:"httpproxy_orphaned"`
+	TargetsProbed        int             `json:"targets_probed"`
+	AuthIssues           int             `json:"auth_issues"`
+	Failures             int             `json:"failures"`
+	ControllerType       string          `json:"controller_type"`
+	HTTPProxiesTotal     int             `json:"httpproxies_total"`
+	HTTPProxiesValid     int             `json:"httpproxies_valid"`
+	HTTPProxiesInvalid   int             `json:"httpproxies_invalid"`
+	HTTPProxiesOrphaned  int             `json:"httpproxies_orphaned"`
+	HTTPProxiesUnknown   int             `json:"httpproxies_unknown"`
+	RoutesTested         int             `json:"routes_tested"`
+	AuthRestrictedRoutes int             `json:"auth_restricted_routes"`
+	FailedRoutes         int             `json:"failed_routes"`
+	HTTPProxies          []httpProxyItem `json:"httpproxies,omitempty"`
+	Routes               []routingResult `json:"routes,omitempty"`
+	DiscoveryErrors      []string        `json:"discovery_errors,omitempty"`
 }
 
 // ViyaAPICheck is a single application-level API validation.
@@ -132,9 +141,8 @@ type ViyaAPICheck struct {
 	CountSource string `json:"count_source,omitempty"`
 	// ErrorDetail carries a sanitized, truncated diagnostic (e.g. a parsed
 	// SAS error body) for checks that failed with a non-obvious cause.
-	ErrorDetail    string             `json:"error_detail,omitempty"`
-	ComputeContext *ComputeContextRef `json:"compute_context,omitempty"`
-	Routing        *RoutingSummary    `json:"routing_summary,omitempty"`
+	ErrorDetail string          `json:"error_detail,omitempty"`
+	Routing     *RoutingSummary `json:"routing_summary,omitempty"`
 }
 
 // ContentInventory records object counts, useful as a DR / restore baseline.
@@ -172,6 +180,9 @@ type ViyaAPIConfig struct {
 	CACertPath            string
 	// APITimeout bounds every individual SAS Viya API call (--viya-api-timeout).
 	APITimeout time.Duration
+	// MaxFailedRoutes overrides defaultMaxFailedRoutes (--max-failed-routes);
+	// zero/unset falls back to the default.
+	MaxFailedRoutes int
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,8 +1119,8 @@ func promptForViyaPassword() string {
 
 // printAPIProgress prints (without a trailing newline) a status line before
 // a potentially slow Viya API call and flushes it immediately, so a long
-// call (SASLogon, a compute session retry loop, etc.) never looks like a
-// hang. Pair with printAPIOutcome once the call returns.
+// call (e.g. SASLogon authentication) never looks like a hang. Pair with
+// printAPIOutcome once the call returns.
 func printAPIProgress(msg string) {
 	fmt.Printf("  %s %s%s%s", SymbolInfo, ColorBlue, msg, ColorReset)
 	_ = os.Stdout.Sync()
@@ -1150,9 +1161,13 @@ func checkViyaAPIHealth(cfg ViyaAPIConfig, namespace, kubeconfig string, strictR
 	token, tokenCheck := viyaAuthenticate(client, cfg)
 	printAPIOutcome(tokenCheck.Status)
 	api.Checks = append(api.Checks, tokenCheck)
+	printAPIProgress("Discovering HTTP routes...")
+	routingCheck := checkViyaHTTPRouting(client, namespace, kubeconfig, cfg, token, strictRouting)
+	printAPIOutcome(routingCheck.Status)
+	api.Checks = append(api.Checks, routingCheck)
 	if token == "" {
 		api.Status = "UNHEALTHY"
-		api.Message = "SASLogon authentication failed - remaining API checks skipped"
+		api.Message = "SASLogon authentication failed - authenticated API checks skipped"
 		return api
 	}
 
@@ -1161,21 +1176,11 @@ func checkViyaAPIHealth(cfg ViyaAPIConfig, namespace, kubeconfig string, strictR
 	printAPIOutcome(fqdnCheck.Status)
 	api.Checks = append(api.Checks, fqdnCheck)
 
-	// HTTP routes (Ingress and/or Contour HTTPProxy) are discovered from the
-	// cluster, so no sasdeployment.yaml is required to validate them.
-	printAPIProgress("Discovering HTTP routes...")
-	routingCheck := checkViyaHTTPRouting(client, namespace, kubeconfig, cfg, token, strictRouting)
-	printAPIOutcome(routingCheck.Status)
-	api.Checks = append(api.Checks, routingCheck)
-
 	printAPIProgress("Checking compute contexts...")
 	contexts, c := viyaCountCollection(client, cfg.BaseURL, token, "Compute Contexts", "/compute/contexts")
 	printAPIOutcome(c.Status)
 	api.Inventory.ComputeContexts = contexts
 	api.Checks = append(api.Checks, c)
-
-	// viyaComputeSession prints its own per-attempt progress.
-	api.Checks = append(api.Checks, viyaComputeSession(client, cfg.BaseURL, token, cfg.Username))
 
 	printAPIProgress("Checking CAS, CASLIBs...")
 	servers, caslibs, casChecks := viyaCASValidation(client, cfg.BaseURL, token)
@@ -1460,272 +1465,6 @@ func viyaCountCollection(client *http.Client, baseURL, token, name, path string)
 	return count, check
 }
 
-// maxErrorBodyBytes bounds how much of a non-2xx response body is captured
-// for diagnostics.
-const maxErrorBodyBytes = 4096
-
-// sasErrorBody covers the common shapes of a SAS REST API error response,
-// including the variant nested under an "error" object.
-type sasErrorBody struct {
-	Message     string      `json:"message"`
-	Details     interface{} `json:"details"`
-	ErrorCode   int         `json:"errorCode"`
-	Remediation string      `json:"remediation"`
-	Err         *struct {
-		Message     string      `json:"message"`
-		Details     interface{} `json:"details"`
-		ErrorCode   int         `json:"errorCode"`
-		Remediation string      `json:"remediation"`
-	} `json:"error"`
-}
-
-// parseSASError extracts message/details/errorCode/remediation from a SAS
-// error body and returns a sanitized, single-line, length-bounded summary.
-// If the body isn't a recognizable SAS error shape, the raw body is
-// sanitized and returned instead so no diagnostic information is lost.
-func parseSASError(body []byte) string {
-	var e sasErrorBody
-	if err := json.Unmarshal(body, &e); err != nil {
-		return sanitizeErrorText(string(body))
-	}
-
-	msg, code, remediation, details := e.Message, e.ErrorCode, e.Remediation, e.Details
-	if e.Err != nil {
-		if msg == "" {
-			msg = e.Err.Message
-		}
-		if code == 0 {
-			code = e.Err.ErrorCode
-		}
-		if remediation == "" {
-			remediation = e.Err.Remediation
-		}
-		if details == nil {
-			details = e.Err.Details
-		}
-	}
-
-	var parts []string
-	if msg != "" {
-		parts = append(parts, "message="+msg)
-	}
-	if code != 0 {
-		parts = append(parts, fmt.Sprintf("errorCode=%d", code))
-	}
-	if details != nil {
-		if b, err := json.Marshal(details); err == nil {
-			parts = append(parts, "details="+string(b))
-		}
-	}
-	if remediation != "" {
-		parts = append(parts, "remediation="+remediation)
-	}
-	if len(parts) == 0 {
-		return sanitizeErrorText(string(body))
-	}
-	return sanitizeErrorText(strings.Join(parts, "; "))
-}
-
-// sanitizeErrorText strips control characters and truncates so diagnostic
-// text is safe to print to the console and embed in the JSON report.
-func sanitizeErrorText(s string) string {
-	s = strings.Map(func(r rune) rune {
-		switch {
-		case r == '\n' || r == '\r' || r == '\t':
-			return ' '
-		case r < 32:
-			return -1
-		default:
-			return r
-		}
-	}, s)
-	s = strings.TrimSpace(s)
-	if len(s) > maxErrorBodyBytes {
-		s = s[:maxErrorBodyBytes] + "...(truncated)"
-	}
-	return s
-}
-
-// isRetryableComputeStatus reports whether an HTTP status from the compute
-// session create call should be retried - only transient gateway errors, not
-// e.g. a 500 (usually a real server-side problem worth surfacing immediately).
-func isRetryableComputeStatus(status int) bool {
-	return status == http.StatusBadGateway ||
-		status == http.StatusServiceUnavailable ||
-		status == http.StatusGatewayTimeout
-}
-
-// viyaComputeSession starts a compute session, verifies its state and always
-// cleans up a session it created. username tailors diagnostics: sasboot
-// commonly lacks the POSIX identity the compute service requires, so a
-// failure for that user is reported as DEGRADED (not UNHEALTHY) with
-// remediation guidance instead of failing the whole run.
-func viyaComputeSession(client *http.Client, baseURL, token, username string) ViyaAPICheck {
-	check := ViyaAPICheck{Name: "Compute Session Startup"}
-
-	degradeForSasboot := func(reason string) ViyaAPICheck {
-		check.Status = "DEGRADED"
-		check.Message = reason + " (user 'sasboot' typically lacks the POSIX identity required by the compute service - retry with a regular LDAP/SCIM user that has compute access)"
-		return check
-	}
-
-	// Locate a SAS Studio compute context.
-	contextID, contextName := "", ""
-	for _, creator := range []string{"sas.SASStudio", "sas.studio"} {
-		endpoint := fmt.Sprintf("%s/compute/contexts?filter=%s",
-			baseURL, url.QueryEscape(fmt.Sprintf(`contains(createdBy,"%s")`, creator)))
-
-		resp, err := viyaRequest(client, http.MethodGet, endpoint, token,
-			"application/vnd.sas.collection+json", nil)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode > 399 {
-			continue
-		}
-
-		var payload struct {
-			Items []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(body, &payload); err == nil && len(payload.Items) > 0 {
-			contextID = payload.Items[0].ID
-			contextName = payload.Items[0].Name
-			break
-		}
-	}
-
-	if contextID != "" {
-		check.ComputeContext = &ComputeContextRef{Name: contextName, ID: contextID}
-	}
-	if contextID == "" {
-		if strings.EqualFold(username, "sasboot") {
-			return degradeForSasboot("No compute context found for sas.SASStudio or sas.studio")
-		}
-		check.Status = "UNHEALTHY"
-		check.Message = "No compute context found for sas.SASStudio or sas.studio"
-		return check
-	}
-
-	// Create a session. Some SAS builds reject a nil body with the
-	// compute.session.request content type, so send an empty JSON object.
-	// Only network errors and 502/503/504 are retried - other statuses (e.g.
-	// 500) are reported immediately with the parsed error body so the real
-	// cause is visible instead of being retried away.
-	sessionID := ""
-	var lastStatus int
-	var lastErrDetail string
-	for attempt := 1; attempt <= computeMaxRetries; attempt++ {
-		printAPIProgress(fmt.Sprintf("Starting compute session (attempt %d/%d)...", attempt, computeMaxRetries))
-
-		endpoint := fmt.Sprintf("%s/compute/contexts/%s/sessions", baseURL, contextID)
-		req, reqErr := http.NewRequest(http.MethodPost, endpoint, strings.NewReader("{}"))
-		if reqErr != nil {
-			printAPIOutcome("UNHEALTHY")
-			check.Status = "UNHEALTHY"
-			check.Message = reqErr.Error()
-			return check
-		}
-		req.Header.Set("Authorization", token)
-		req.Header.Set("Content-Type", "application/vnd.sas.compute.session.request+json")
-		req.Header.Set("Accept", "application/vnd.sas.compute.session+json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErrDetail = sanitizeErrorText(err.Error())
-			printAPIOutcome("DEGRADED")
-			if attempt < computeMaxRetries {
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			break
-		}
-
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		resp.Body.Close()
-		lastStatus = resp.StatusCode
-
-		if resp.StatusCode >= 200 && resp.StatusCode <= 399 {
-			var payload struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(body, &payload); err == nil && payload.ID != "" {
-				sessionID = payload.ID
-				printAPIOutcome("HEALTHY")
-				break
-			}
-			lastErrDetail = "Session response did not contain an id"
-			printAPIOutcome("UNHEALTHY")
-			break
-		}
-
-		lastErrDetail = parseSASError(body)
-		printAPIOutcome("DEGRADED")
-		if isRetryableComputeStatus(resp.StatusCode) && attempt < computeMaxRetries {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		break
-	}
-
-	check.HTTPStatus = lastStatus
-	if sessionID == "" {
-		check.ErrorDetail = lastErrDetail
-		reason := fmt.Sprintf("Unable to create compute session (last status %d): %s", lastStatus, lastErrDetail)
-		if strings.EqualFold(username, "sasboot") {
-			return degradeForSasboot(reason)
-		}
-		check.Status = "UNHEALTHY"
-		check.Message = reason
-		return check
-	}
-
-	// Verify state, then always clean up the session that was created.
-	state := ""
-	for attempt := 1; attempt <= computeMaxRetries; attempt++ {
-		endpoint := fmt.Sprintf("%s/compute/sessions/%s/state", baseURL, sessionID)
-		resp, err := viyaRequest(client, http.MethodGet, endpoint, token, "", nil)
-		if err != nil {
-			if attempt < computeMaxRetries {
-				time.Sleep(5 * time.Second)
-			}
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		state = strings.ToLower(strings.TrimSpace(string(body)))
-		if state == "running" || state == "idle" {
-			break
-		}
-		if attempt < computeMaxRetries {
-			time.Sleep(5 * time.Second)
-		}
-	}
-
-	// Cleanup regardless of state result.
-	delResp, err := viyaRequest(client, http.MethodDelete,
-		fmt.Sprintf("%s/compute/sessions/%s", baseURL, sessionID), token, "", nil)
-	if err == nil {
-		io.Copy(io.Discard, delResp.Body)
-		delResp.Body.Close()
-	}
-
-	if state == "running" || state == "idle" {
-		check.Status = "HEALTHY"
-		check.Message = fmt.Sprintf("Compute session started (state=%s) and stopped successfully", state)
-	} else {
-		check.Status = "UNHEALTHY"
-		check.Message = fmt.Sprintf("Compute session did not reach running/idle state (state=%s)", state)
-	}
-	return check
-}
-
 // viyaCASValidation validates CAS servers, their state and their caslibs.
 func viyaCASValidation(client *http.Client, baseURL, token string) (int, int, []ViyaAPICheck) {
 	var checks []ViyaAPICheck
@@ -1834,9 +1573,29 @@ func viyaCASValidation(client *http.Client, baseURL, token string) (int, int, []
 // deployments are probed against the correct FQDN regardless of which
 // routing mechanism the cluster uses.
 type routingTarget struct {
-	Host   string
-	Path   string
-	Source string // "ingress" or "httpproxy"
+	Host      string
+	Path      string
+	Source    string // "ingress" or "httpproxy"
+	Name      string
+	Namespace string
+	Services  []httpProxyService
+}
+
+type httpProxyService struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+}
+
+type routingResult struct {
+	URL            string             `json:"url"`
+	Source         string             `json:"source"`
+	Name           string             `json:"name"`
+	Namespace      string             `json:"namespace"`
+	Services       []httpProxyService `json:"services,omitempty"`
+	Status         string             `json:"status"`
+	HTTPStatus     int                `json:"http_status,omitempty"`
+	AuthRestricted bool               `json:"auth_restricted"`
+	Message        string             `json:"message,omitempty"`
 }
 
 // httpProxyCondition mirrors one entry of a Contour HTTPProxy route or
@@ -1863,10 +1622,7 @@ type httpProxyItem struct {
 		} `json:"virtualhost"`
 		Routes []struct {
 			Conditions []httpProxyCondition `json:"conditions"`
-			Services   []struct {
-				Name string `json:"name"`
-				Port int    `json:"port"`
-			} `json:"services"`
+			Services   []httpProxyService   `json:"services"`
 		} `json:"routes"`
 		Includes []struct {
 			Name       string               `json:"name"`
@@ -1901,7 +1657,36 @@ func fetchHTTPProxies(kubeconfig, namespace string) ([]httpProxyItem, error) {
 		}
 		return nil, err
 	}
-	return list.Items, nil
+	known := make(map[string]bool)
+	for _, item := range list.Items {
+		known[item.Metadata.Namespace+"/"+item.Metadata.Name] = true
+	}
+	var discoveryErrors []error
+	for index := 0; index < len(list.Items); index++ {
+		item := list.Items[index]
+		for _, include := range item.Spec.Includes {
+			childNamespace := include.Namespace
+			if childNamespace == "" {
+				childNamespace = item.Metadata.Namespace
+			}
+			key := childNamespace + "/" + include.Name
+			if known[key] {
+				continue
+			}
+			known[key] = true
+			if include.Name == "" {
+				discoveryErrors = append(discoveryErrors, fmt.Errorf("HTTPProxy %s/%s has an unnamed include", item.Metadata.Namespace, item.Metadata.Name))
+				continue
+			}
+			var child httpProxyItem
+			if err := kubectlJSON(kubeconfig, &child, "get", "httpproxies.projectcontour.io", include.Name, "-n", childNamespace); err != nil {
+				discoveryErrors = append(discoveryErrors, err)
+				continue
+			}
+			list.Items = append(list.Items, child)
+		}
+	}
+	return list.Items, errors.Join(discoveryErrors...)
 }
 
 // normalizeRoutingPrefix ensures a path starts with "/" and has no trailing
@@ -1964,7 +1749,7 @@ func resolveHTTPProxyRoutes(items []httpProxyItem) (targets []routingTarget, val
 	}
 
 	for _, root := range items {
-		if root.Spec.VirtualHost == nil || root.Spec.VirtualHost.FQDN == "" {
+		if root.Spec.VirtualHost == nil {
 			continue
 		}
 		// visited is scoped per root traversal and keyed by namespace/name,
@@ -1982,10 +1767,11 @@ func walkHTTPProxy(item httpProxyItem, fqdn, parentPrefix string, byName map[str
 		return
 	}
 	visited[key] = true
+	defer delete(visited, key)
 
 	for _, route := range item.Spec.Routes {
 		prefix := combineRoutingPrefix(parentPrefix, firstPrefixCondition(route.Conditions))
-		*targets = append(*targets, routingTarget{Host: fqdn, Path: prefix, Source: "httpproxy"})
+		*targets = append(*targets, routingTarget{Host: fqdn, Path: prefix, Source: "httpproxy", Name: item.Metadata.Name, Namespace: item.Metadata.Namespace, Services: route.Services})
 	}
 
 	for _, inc := range item.Spec.Includes {
@@ -2014,7 +1800,7 @@ func walkHTTPProxy(item httpProxyItem, fqdn, parentPrefix string, byName map[str
 func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg ViyaAPIConfig, token string, strictRouting bool) ViyaAPICheck {
 	check := ViyaAPICheck{Name: "HTTP Routing Endpoints"}
 
-	if !cfg.Enabled || token == "" {
+	if !cfg.Enabled {
 		check.Status = "SKIPPED"
 		check.Message = "HTTP routing validation skipped (Viya API checks disabled)"
 		return check
@@ -2044,7 +1830,7 @@ func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg
 						continue
 					}
 					seen[key] = true
-					targets = append(targets, routingTarget{Host: rule.Host, Path: path, Source: "ingress"})
+					targets = append(targets, routingTarget{Host: rule.Host, Path: path, Source: "ingress", Name: ing.Metadata.Name, Namespace: namespace})
 				}
 			}
 		}
@@ -2053,7 +1839,7 @@ func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg
 
 	proxies, proxyErr := fetchHTTPProxies(kubeconfig, namespace)
 	var httpProxyValid, httpProxyInvalid, httpProxyOrphaned int
-	if proxyErr == nil && len(proxies) > 0 {
+	if len(proxies) > 0 {
 		proxyTargets, valid, invalid, orphaned := resolveHTTPProxyRoutes(proxies)
 		httpProxyValid, httpProxyInvalid, httpProxyOrphaned = valid, invalid, orphaned
 		for _, t := range proxyTargets {
@@ -2067,38 +1853,40 @@ func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg
 	}
 	httpProxyRouteCount := len(targets) - ingressCount
 
-	// Only fail outright if both discovery mechanisms errored; either one
-	// alone succeeding (e.g. HTTPProxy CRD absent) is a normal configuration.
-	if ingressErr != nil && proxyErr != nil {
-		check.Status = "DEGRADED"
-		check.Message = fmt.Sprintf("Unable to list Ingress (%v) or HTTPProxy (%v) resources", ingressErr, proxyErr)
-		return check
-	}
-
 	routingType := "none"
+	controllerType := "none"
 	switch {
-	case ingressCount > 0 && httpProxyRouteCount > 0:
+	case len(ingresses.Items) > 0 && len(proxies) > 0:
 		routingType = "both"
-	case ingressCount > 0:
+		controllerType = "mixed"
+	case len(ingresses.Items) > 0:
 		routingType = "ingress"
-	case httpProxyRouteCount > 0:
+		controllerType = "ingress"
+	case len(proxies) > 0:
 		routingType = "httpproxy"
+		controllerType = "contour"
 	}
 
 	summary := &RoutingSummary{
-		RoutingType:       routingType,
-		IngressPaths:      ingressCount,
-		HTTPProxyRoutes:   httpProxyRouteCount,
-		HTTPProxyValid:    httpProxyValid,
-		HTTPProxyInvalid:  httpProxyInvalid,
-		HTTPProxyOrphaned: httpProxyOrphaned,
+		RoutingType:         routingType,
+		IngressPaths:        ingressCount,
+		HTTPProxyRoutes:     httpProxyRouteCount,
+		HTTPProxyValid:      httpProxyValid,
+		HTTPProxyInvalid:    httpProxyInvalid,
+		HTTPProxyOrphaned:   httpProxyOrphaned,
+		ControllerType:      controllerType,
+		HTTPProxiesTotal:    len(proxies),
+		HTTPProxiesValid:    httpProxyValid,
+		HTTPProxiesInvalid:  httpProxyInvalid,
+		HTTPProxiesOrphaned: httpProxyOrphaned,
+		HTTPProxiesUnknown:  len(proxies) - httpProxyValid - httpProxyInvalid - httpProxyOrphaned,
+		HTTPProxies:         proxies,
 	}
 	check.Routing = summary
-
-	if len(targets) == 0 {
-		check.Status = "DEGRADED"
-		check.Message = "No ingress or HTTPProxy routes found to validate"
-		return check
+	for _, err := range []error{ingressErr, proxyErr} {
+		if err != nil {
+			summary.DiscoveryErrors = append(summary.DiscoveryErrors, err.Error())
+		}
 	}
 
 	scheme := "https"
@@ -2106,49 +1894,98 @@ func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg
 		scheme = u.Scheme
 	}
 
-	failures := 0
-	authIssues := 0
+	probeClient := *client
+	probeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	failures, authIssues := 0, 0
 
 	for _, t := range targets {
-		target := cfg.BaseURL + t.Path
+		target := strings.TrimRight(cfg.BaseURL, "/") + t.Path
 		// Use the route's own host when present - required for multi-tenant
 		// deployments where paths resolve under distinct FQDNs.
 		if t.Host != "" {
-			target = scheme + "://" + t.Host + t.Path
+			routeScheme := scheme
+			if t.Source == "httpproxy" {
+				routeScheme = "https"
+			}
+			target = routeScheme + "://" + t.Host + t.Path
 		}
 
-		resp, err := viyaRequest(client, http.MethodGet, target, token, "", nil)
+		result := routingResult{URL: target, Source: t.Source, Name: t.Name, Namespace: t.Namespace, Services: t.Services}
+		resp, err := viyaRequest(&probeClient, http.MethodGet, target, token, "", nil)
 		if err != nil {
 			failures++
+			result.Status = "UNHEALTHY"
+			result.Message = err.Error()
+			summary.Routes = append(summary.Routes, result)
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
+		_, bodyErr := io.Copy(io.Discard, resp.Body)
 		code := resp.StatusCode
 		resp.Body.Close()
+		result.HTTPStatus = code
 
 		switch {
+		case bodyErr != nil:
+			failures++
+			result.Status = "UNHEALTHY"
+			result.Message = bodyErr.Error()
 		case code >= 200 && code <= 399:
-			// healthy
+			result.Status = "HEALTHY"
 		case code == 401 || code == 403:
 			// A non-admin test user is expected to be denied some paths -
 			// informational only, unless --strict-routing was requested.
 			authIssues++
+			result.Status = "HEALTHY"
+			result.AuthRestricted = true
+			result.Message = "Reachable (authentication restricted; informational)"
+		case code >= 500 && code <= 599:
+			failures++
+			result.Status = "UNHEALTHY"
 		default:
 			failures++
+			result.Status = "DEGRADED"
 		}
+		summary.Routes = append(summary.Routes, result)
 	}
 
 	summary.TargetsProbed = len(targets)
 	summary.AuthIssues = authIssues
 	summary.Failures = failures
+	summary.RoutesTested = len(targets)
+	summary.AuthRestrictedRoutes = authIssues
+	summary.FailedRoutes = failures
 	check.Count = len(targets)
 
 	invalidOrOrphaned := httpProxyInvalid + httpProxyOrphaned
+	brokenRoutes := failures + invalidOrOrphaned
+
+	// maxFailedRoutes bounds how many broken routes/HTTPProxies are tolerated
+	// before the check flips UNHEALTHY; at or under the threshold the check
+	// stays HEALTHY but the endpoint list is still rendered (see
+	// displayViyaAPIResults) so the failures remain visible.
+	maxFailedRoutes := cfg.MaxFailedRoutes
+	if maxFailedRoutes <= 0 {
+		maxFailedRoutes = defaultMaxFailedRoutes
+	}
+
 	switch {
-	case failures > 0 || invalidOrOrphaned > 0:
+	case brokenRoutes > maxFailedRoutes:
 		check.Status = "UNHEALTHY"
-		check.Message = fmt.Sprintf("%d of %d route(s) failed (%d auth-restricted, %d invalid/orphaned HTTPProxy)",
-			failures, len(targets), authIssues, invalidOrOrphaned)
+		check.Message = fmt.Sprintf("%d of %d route(s) failed (%d auth-restricted, %d invalid/orphaned HTTPProxy) - exceeds tolerance of %d",
+			failures, len(targets), authIssues, invalidOrOrphaned, maxFailedRoutes)
+	case brokenRoutes > 0:
+		// Within tolerance - takes precedence over the empty-route case below
+		// so an invalid/orphaned HTTPProxy with no resolvable routes is still
+		// reported, not masked by a generic "no routes found" message.
+		check.Status = "HEALTHY"
+		check.Message = fmt.Sprintf("%d of %d route(s) failed (%d auth-restricted, %d invalid/orphaned HTTPProxy) - within tolerance of %d, see endpoint list below",
+			failures, len(targets), authIssues, invalidOrOrphaned, maxFailedRoutes)
+	case len(targets) == 0:
+		check.Status = "DEGRADED"
+		check.Message = "No Ingress or HTTPProxy routes found to validate; neither resource type exposes a route"
+	case summary.HTTPProxiesUnknown > 0 || len(summary.DiscoveryErrors) > 0:
+		check.Status = "DEGRADED"
+		check.Message = fmt.Sprintf("%d HTTPProxy status(es) unknown, %d discovery error(s)", summary.HTTPProxiesUnknown, len(summary.DiscoveryErrors))
 	case authIssues > 0 && strictRouting:
 		check.Status = "DEGRADED"
 		check.Message = fmt.Sprintf("All %d route(s) reachable, %d returned 401/403 (--strict-routing)",
@@ -2160,6 +1997,9 @@ func checkViyaHTTPRouting(client *http.Client, namespace, kubeconfig string, cfg
 	default:
 		check.Status = "HEALTHY"
 		check.Message = fmt.Sprintf("All %d route(s) reachable (%s routing)", len(targets), routingType)
+	}
+	if len(summary.DiscoveryErrors) > 0 {
+		check.ErrorDetail = strings.Join(summary.DiscoveryErrors, "; ")
 	}
 
 	return check
@@ -2232,6 +2072,21 @@ func displayDeploymentMetadataResults(meta DeploymentMetadataHealth) {
 	fmt.Printf("%s└%s%s\n\n", ColorWhite, strings.Repeat("─", 79), ColorReset)
 }
 
+// printRoutingResultList prints up to 10 routes, each formatted by render,
+// followed by a "... and N more" line if the list is longer.
+func printRoutingResultList(routes []routingResult, render func(routingResult) string) {
+	limit := len(routes)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		fmt.Printf("│         • %s\n", render(routes[i]))
+	}
+	if len(routes) > limit {
+		fmt.Printf("│         • ... and %d more\n", len(routes)-limit)
+	}
+}
+
 func displayViyaAPIResults(api ViyaAPIHealth) {
 	fmt.Printf("%s%s┌─ VIYA APPLICATION CHECK %s%s\n", ColorBold, ColorWhite, strings.Repeat("─", 53), ColorReset)
 
@@ -2251,13 +2106,51 @@ func displayViyaAPIResults(api ViyaAPIHealth) {
 			fmt.Printf("│   %s%s%s %-32s %s\n", cColor, cSymbol, ColorReset, c.Name, c.Message)
 			if c.Routing != nil {
 				r := c.Routing
-				fmt.Printf("│       routing type: %s | ingress paths: %d | httpproxy routes: %d | probed: %d\n",
-					r.RoutingType, r.IngressPaths, r.HTTPProxyRoutes, r.TargetsProbed)
-				fmt.Printf("│       httpproxy status: valid=%d invalid=%d orphaned=%d\n",
-					r.HTTPProxyValid, r.HTTPProxyInvalid, r.HTTPProxyOrphaned)
-			}
-			if c.ComputeContext != nil {
-				fmt.Printf("│       compute context: %s (%s)\n", c.ComputeContext.Name, c.ComputeContext.ID)
+				fmt.Printf("│       Controller Type : %s\n", r.ControllerType)
+				fmt.Printf("│       HTTPProxies     : %d\n", r.HTTPProxiesTotal)
+				fmt.Printf("│       Valid           : %d\n", r.HTTPProxiesValid)
+				fmt.Printf("│       Invalid         : %d\n", r.HTTPProxiesInvalid)
+				fmt.Printf("│       Orphaned        : %d\n", r.HTTPProxiesOrphaned)
+				fmt.Printf("│       Unknown         : %d\n", r.HTTPProxiesUnknown)
+				fmt.Printf("│       Routes Tested   : %d\n", r.RoutesTested)
+				fmt.Printf("│       Auth Restricted : %d (informational)\n", r.AuthRestrictedRoutes)
+				fmt.Printf("│       Failures        : %d\n", r.FailedRoutes)
+
+				var invalidOrOrphaned []httpProxyItem
+				for _, proxy := range r.HTTPProxies {
+					switch strings.ToLower(strings.TrimSpace(proxy.Status.CurrentStatus)) {
+					case "invalid", "orphaned":
+						invalidOrOrphaned = append(invalidOrOrphaned, proxy)
+					}
+				}
+				if len(invalidOrOrphaned) > 0 {
+					fmt.Printf("│       Invalid/Orphaned HTTPProxies:\n")
+					for _, proxy := range invalidOrOrphaned {
+						fmt.Printf("│         • %s/%s: %s - %s\n", proxy.Metadata.Namespace, proxy.Metadata.Name, proxy.Status.CurrentStatus, proxy.Status.Description)
+					}
+				}
+
+				var failedRoutes, authRestrictedRoutes []routingResult
+				for _, route := range r.Routes {
+					switch {
+					case route.AuthRestricted:
+						authRestrictedRoutes = append(authRestrictedRoutes, route)
+					case route.Status != "HEALTHY":
+						failedRoutes = append(failedRoutes, route)
+					}
+				}
+				if len(failedRoutes) > 0 {
+					fmt.Printf("│       Failed Routes:\n")
+					printRoutingResultList(failedRoutes, func(route routingResult) string {
+						return fmt.Sprintf("%s %s (HTTP %d) %s", route.Status, route.URL, route.HTTPStatus, route.Message)
+					})
+				}
+				if len(authRestrictedRoutes) > 0 {
+					fmt.Printf("│       Auth-Restricted Routes (401/403, informational):\n")
+					printRoutingResultList(authRestrictedRoutes, func(route routingResult) string {
+						return fmt.Sprintf("%s (HTTP %d)", route.URL, route.HTTPStatus)
+					})
+				}
 			}
 			if c.ErrorDetail != "" {
 				fmt.Printf("│       error detail: %s\n", c.ErrorDetail)

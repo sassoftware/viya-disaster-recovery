@@ -10,6 +10,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+)
+
+// Supported VIYA_DEPLOYMENT_TYPE values. Both run the same Velero backup/restore
+// workflow; MT only adds the logging and sync-wait differences noted below.
+const (
+	deploymentTypeNMT = "nmt"
+	deploymentTypeMT  = "mt"
+
+	// mtExtraBackupSyncWait is added to the backup sync wait during restore for MT
+	// deployments, matching the on-prem MT restore guardrail.
+	mtExtraBackupSyncWait = 40 * time.Second
 )
 
 type Environment struct {
@@ -44,7 +56,7 @@ func GetEnvironment() Environment {
 		VeleroSnapRG:               getPropertyWithDefault(props, "VELERO_SNAP_RG", "psvelerosnapsrg"),
 		Location:                   getPropertyWithDefault(props, "LOCATION", "eastus"),
 		KubeconfigPath:             getPropertyWithDefault(props, "KUBECONFIG_PATH", "/u/qstauto/.kube/auto/pscloudrestore-aks-cxwaknyb.hcp.eastus.azmk8s.io/kubeconfig"),
-		ViyaDeploymentType:         getPropertyWithDefault(props, "VIYA_DEPLOYMENT_TYPE", "nmt"),
+		ViyaDeploymentType:         strings.ToLower(getPropertyWithDefault(props, "VIYA_DEPLOYMENT_TYPE", deploymentTypeNMT)),
 		ClusterType:                getPropertyWithDefault(props, "CLUSTER_TYPE", "source"),
 		VeleroServicePrincipalName: getPropertyWithDefault(props, "VELERO_SERVICE_PRINCIPAL_NAME", "velero-sp"),
 		SourceMCResourceGroup:      getPropertyWithDefault(props, "SOURCE_MC_RESOURCE_GROUP", "MC_pscloudrestore-rg_pscloudrestore-aks_eastus"),
@@ -244,13 +256,23 @@ func (e Environment) Print() {
 	fmt.Println("=============================")
 }
 
-// ValidateViyaDeploymentType checks if the current deployment type supports the requested operation
-func (e Environment) ValidateViyaDeploymentType(operation string) error {
-	if e.ViyaDeploymentType == "mt" {
-		return fmt.Errorf("  Operation '%s' is not supported for Multi-Tenant (MT) Viya deployments. Only Non-Multi-Tenant (NMT) deployments support Velero backup operations", operation)
-	}
+// IsMultiTenant reports whether the configured Viya deployment is multi-tenant (mt).
+func (e Environment) IsMultiTenant() bool {
+	return e.ViyaDeploymentType == deploymentTypeMT
+}
 
-	if e.ViyaDeploymentType != "nmt" && e.ViyaDeploymentType != "mt" {
+// DeploymentTypeLabel returns a human-readable label for logging.
+func (e Environment) DeploymentTypeLabel() string {
+	if e.IsMultiTenant() {
+		return "MT (Multi-Tenant)"
+	}
+	return "NMT (Non-Multi-Tenant)"
+}
+
+// ValidateViyaDeploymentType checks that the deployment type is valid for the requested operation.
+// Both nmt and mt run the same Velero workflow.
+func (e Environment) ValidateViyaDeploymentType(operation string) error {
+	if e.ViyaDeploymentType != deploymentTypeNMT && e.ViyaDeploymentType != deploymentTypeMT {
 		return fmt.Errorf("  Invalid ViyaDeploymentType: '%s'. Must be 'nmt' (Non-Multi-Tenant) or 'mt' (Multi-Tenant)", e.ViyaDeploymentType)
 	}
 
@@ -284,7 +306,7 @@ func (e Environment) ValidateEnvironment() error {
 	}
 
 	// Validate ViyaDeploymentType
-	if e.ViyaDeploymentType != "nmt" && e.ViyaDeploymentType != "mt" {
+	if e.ViyaDeploymentType != deploymentTypeNMT && e.ViyaDeploymentType != deploymentTypeMT {
 		errors = append(errors, fmt.Sprintf("Invalid ViyaDeploymentType: '%s'. Must be 'nmt' or 'mt'", e.ViyaDeploymentType))
 	}
 

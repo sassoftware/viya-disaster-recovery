@@ -40,7 +40,7 @@ func main() {
 
 		if err := env.ValidateViyaDeploymentType("Velero restore"); err != nil {
 			fmt.Println(err)
-			fmt.Println("\nNote: Change VIYA_DEPLOYMENT_TYPE to 'nmt' in environment.properties file")
+			fmt.Println("\nNote: Set VIYA_DEPLOYMENT_TYPE to 'nmt' or 'mt' in environment.properties file")
 			os.Exit(1)
 		}
 
@@ -79,7 +79,7 @@ func main() {
 
 		if err := env.ValidateViyaDeploymentType("Velero backup"); err != nil {
 			fmt.Println(err)
-			fmt.Println("\nNote: Change VIYA_DEPLOYMENT_TYPE to 'nmt' in environment.properties file")
+			fmt.Println("\nNote: Set VIYA_DEPLOYMENT_TYPE to 'nmt' or 'mt' in environment.properties file")
 			os.Exit(1)
 		}
 
@@ -93,7 +93,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := ExecuteBackup(); err != nil {
+		if err := ExecuteBackup(env); err != nil {
 			fmt.Println("Backup execution failed:", err)
 			os.Exit(1)
 		}
@@ -179,12 +179,12 @@ func main() {
 			// Validate deployment type for backup
 			if err := env.ValidateViyaDeploymentType("Velero backup"); err != nil {
 				fmt.Println(err)
-				fmt.Println("\nNote: Change ViyaDeploymentType to 'nmt' in environment_details.go to enable backup operations")
+				fmt.Println("\nNote: Set VIYA_DEPLOYMENT_TYPE to 'nmt' or 'mt' in environment.properties file")
 				os.Exit(1)
 			}
 
 			fmt.Println("\nStarting Velero Backup...")
-			if err := ExecuteBackup(); err != nil {
+			if err := ExecuteBackup(env); err != nil {
 				fmt.Printf("Velero backup failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -194,7 +194,7 @@ func main() {
 			// Validate deployment type for restore
 			if err := env.ValidateViyaDeploymentType("Velero restore"); err != nil {
 				fmt.Println(err)
-				fmt.Println("\nNote: Change ViyaDeploymentType to 'nmt' in environment_details.go to enable restore operations")
+				fmt.Println("\nNote: Set VIYA_DEPLOYMENT_TYPE to 'nmt' or 'mt' in environment.properties file")
 				os.Exit(1)
 			}
 

@@ -8,7 +8,7 @@
 
 Comprehensive automation suite for deploying Velero on Azure Kubernetes Service
 (AKS) clusters, enabling disaster recovery for SAS Viya 4 Non-Multi-Tenant (NMT)
-deployments. This solution includes two main tools: the core Velero automation
+and Multi-Tenant (MT) deployments. This solution includes two main tools: the core Velero automation
 CLI and an independent SAS Viya health checker.
 
 ## Table of Contents
@@ -66,7 +66,7 @@ CLI and an independent SAS Viya health checker.
 |-----------|---------|-------|
 | Kubernetes | 1.24+ | AKS cluster version |
 | AKS | Latest stable | Azure Kubernetes Service |
-| SAS Viya 4 | Tested on and above Stable 2025.09 | Non-Multi-Tenant (NMT) only |
+| SAS Viya 4 | Tested on and above Stable 2025.09 | Non-Multi-Tenant (NMT) validated; Multi-Tenant (MT) supported via `VIYA_DEPLOYMENT_TYPE=mt` (see below) |
 | Velero | 1.17+ | Installed by automation |
 | Velero Azure Plugin | 1.10+ | Installed by automation |
 
@@ -183,7 +183,7 @@ LOCATION=eastus                        # Azure region
 
 # Cluster Configuration
 CLUSTER_TYPE=source                    # source|restore
-VIYA_DEPLOYMENT_TYPE=nmt               # nmt|mt (only nmt supported)
+VIYA_DEPLOYMENT_TYPE=nmt               # nmt|mt (both use the same backup/restore workflow)
 KUBECONFIG_PATH=/path/to/kubeconfig    # Cluster kubeconfig path
 
 # NFS Storage Class
@@ -203,6 +203,10 @@ MANUAL_SUBSCRIPTION_ID=your-subscription-id
 | **Setup** | `source` | Source cluster path | Initial infrastructure provisioning |
 | **Backup** | `source` | Source cluster path | Run from source cluster |
 | **Restore** | `restore` | Target/DR cluster path | See Restore Pre-Requisites |
+
+### Multi-Tenant (MT) Support
+
+`VIYA_DEPLOYMENT_TYPE` accepts `nmt` (Non-Multi-Tenant) or `mt` (Multi-Tenant), case-insensitively; an invalid value fails fast before any operation starts. Both values run the identical backup, restore and cleanup workflow in this folder. The value only affects the deployment type shown in the logs and one restore setting: for `mt`, the backup-metadata sync wait during restore is extended by 40 seconds, because tenant onboarding adds extra Velero metadata to sync from storage. Enter the MT provider/tenant namespace (commonly `mt`) when prompted for the Viya namespace.
 
 ## Operations
 
@@ -369,7 +373,7 @@ LOCATION=eastus
 # *** CHANGE FOR RESTORE *** — must be "restore" (was "source" on backup cluster)
 CLUSTER_TYPE=restore
 
-# Only "nmt" supported
+# nmt or mt (use the same value as on the source cluster)
 VIYA_DEPLOYMENT_TYPE=nmt
 
 # *** CHANGE FOR RESTORE *** — must point to DR cluster kubeconfig (not source cluster)

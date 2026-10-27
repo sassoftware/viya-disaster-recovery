@@ -787,8 +787,9 @@ func isSystemNodePool(nodePool string) bool {
 }
 
 // ExecuteBackup orchestrates the complete backup process with validations
-func ExecuteBackup() error {
+func ExecuteBackup(env Environment) error {
 	fmt.Println("\n    Starting Velero Backup Process")
+	fmt.Printf("   Running %s backup workflow\n", env.DeploymentTypeLabel())
 	fmt.Println("==================================")
 
 	// Show kubeconfig information for debugging
@@ -1237,6 +1238,7 @@ func ExecuteRestore() error {
 
 	fmt.Println("\n   Starting Complete Velero Restore Process")
 	fmt.Println("==========================================")
+	fmt.Printf("   Running %s restore workflow\n", env.DeploymentTypeLabel())
 
 	// Validate environment for restore operations
 	if err := env.ValidateViyaDeploymentType("Velero restore"); err != nil {
@@ -1300,7 +1302,7 @@ func ExecuteRestore() error {
 	// Step 7: List available backups and prompt for selection
 	fmt.Println("\nSTEP 7: Retrieving available backups from Azure storage")
 	fmt.Println("======================================================")
-	backups, err := listAvailableBackups()
+	backups, err := listAvailableBackups(env)
 	if err != nil {
 		return fmt.Errorf("failed to list backups: %v", err)
 	}
@@ -1405,7 +1407,7 @@ func ExecuteRestore() error {
 }
 
 // listAvailableBackups gets list of backups from Velero with sync from Azure storage
-func listAvailableBackups() ([]string, error) {
+func listAvailableBackups(env Environment) ([]string, error) {
 	fmt.Printf("   Syncing backup metadata from Azure storage to restore cluster...\n")
 
 	// Force Velero to sync backup metadata from Azure storage
@@ -1420,8 +1422,13 @@ func listAvailableBackups() ([]string, error) {
 		fmt.Printf("   Backup sync triggered successfully\n")
 
 		// Wait for initial sync to complete (increased timing for Azure storage)
-		fmt.Printf("   Waiting for backup metadata sync to complete (30 seconds)...\n")
-		time.Sleep(30 * time.Second)
+		syncWait := 30 * time.Second
+		if env.IsMultiTenant() {
+			// MT: tenant onboarding adds extra Velero metadata to sync from object storage.
+			syncWait += mtExtraBackupSyncWait
+		}
+		fmt.Printf("   Waiting for backup metadata sync to complete (%d seconds)...\n", int(syncWait.Seconds()))
+		time.Sleep(syncWait)
 	}
 
 	// Try to get backups from the cluster

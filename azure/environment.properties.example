@@ -20,8 +20,8 @@ NFS_STORAGE_CLASS=sas
 
 # Viya Deployment Configuration
 # -----------------------------
-# Valid values: "nmt" (Non-Multi-Tenant) or "mt" (Multi-Tenant)
-# Note: Only "nmt" supports Velero backup operations
+# Valid values: "nmt" (Non-Multi-Tenant) or "mt" (Multi-Tenant), case-insensitive
+# Both run the same Velero backup/restore workflow; mt adds an extra 40s backup-sync wait during restore
 VIYA_DEPLOYMENT_TYPE=nmt
 
 # Cluster Type Configuration
